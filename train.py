@@ -31,11 +31,11 @@ class DummyDataset(Dataset):
 
 # setup model and distributed wrapper
 model = Net()
-model = arceus.wrap(model, show_graph=(rank == 0))
+model = arceus.wrap(model, show_graph=(rank == 0))  # auto_device=True by default
 
-# device setup
-device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
-model.to(device)
+# get device info (arceus automatically detected and moved model to best device)
+device = arceus.get_device()
+device_info = arceus.get_device_info()
 
 # training setup
 criterion = nn.CrossEntropyLoss()
@@ -47,7 +47,7 @@ for epoch in range(args.epochs):
     progress_bar = arceus.progress(dataloader)
     
     for data, target in progress_bar:
-        data, target = data.to(device), target.to(device)
+        data, target = arceus.to_device(data), arceus.to_device(target)
         
         optimizer.zero_grad()
         output = model(data)

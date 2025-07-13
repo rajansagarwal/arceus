@@ -3,12 +3,15 @@ import uuid
 
 from .networking import UDPBeacon
 from .distributed import TrainingHost, TrainingJoiner
-from .utils import banner, wait_for_sessions, pick_session, init_pytorch_distributed, BOLD, END
+from .utils import (banner, wait_for_sessions, pick_session, init_pytorch_distributed, 
+                   detect_device, print_device_info, move_to_device, BOLD, END)
 
 # Global state
 _beacon = None
 _rank = None
 _world = None
+_device = None
+_device_info = None
 
 def init(mode="auto", session=None, timeout=5):
     """
@@ -91,10 +94,15 @@ def init(mode="auto", session=None, timeout=5):
     # Initialize PyTorch distributed
     init_pytorch_distributed(_world, _rank)
     
+    # Detect and set up device
+    global _device, _device_info
+    _device, _device_info = detect_device()
+    print_device_info(_device, _device_info, _rank)
+    
     return _rank, len(_world)
 
-def wrap(model, show_graph=False):
-    """add distributed gradient averaging hooks to model"""
+def wrap(model, show_graph=False, auto_device=True):
+    """add distributed gradient averaging hooks to model and handle device placement"""
     import torch
     import torch.fx
     
@@ -102,17 +110,29 @@ def wrap(model, show_graph=False):
         print("=== Model Graph ===")
         print(torch.fx.symbolic_trace(model).graph)
     
-    # single process, nothing to do
+    # Move model to detected device if auto_device is enabled
+    if auto_device and _device is not None:
+        model = move_to_device(model, _device)
+    
+    # single process, nothing to do for distributed training
     if len(_world) == 1:
         return model
     
     # hook to average gradients across all ranks
     def grad_hook(grad):
         import torch
-        g_cpu = grad.detach().cpu()
-        torch.distributed.all_reduce(g_cpu)
-        g_cpu /= len(_world)
-        return g_cpu.to(grad.device)
+        # For CUDA, keep gradients on GPU during allreduce if possible
+        if _device.type == "cuda" and torch.distributed.get_backend() == "nccl":
+            # NCCL can handle GPU tensors directly
+            torch.distributed.all_reduce(grad)
+            grad /= len(_world)
+            return grad
+        else:
+            # For MPS/CPU, move to CPU for allreduce
+            g_cpu = grad.detach().cpu()
+            torch.distributed.all_reduce(g_cpu)
+            g_cpu /= len(_world)
+            return g_cpu.to(grad.device)
     
     for p in model.parameters():
         if p.requires_grad:
@@ -121,7 +141,13 @@ def wrap(model, show_graph=False):
     # sync initial weights so everyone starts the same
     import torch
     for p in model.parameters():
-        torch.distributed.broadcast(p.data, src=0)
+        # For CUDA with NCCL, broadcast on GPU; otherwise use CPU
+        if _device.type == "cuda" and torch.distributed.get_backend() == "nccl":
+            torch.distributed.broadcast(p.data, src=0)
+        else:
+            p_cpu = p.data.cpu()
+            torch.distributed.broadcast(p_cpu, src=0)
+            p.data.copy_(p_cpu.to(p.device))
     
     return model
 
@@ -132,6 +158,20 @@ def progress(dataloader):
                 position=_rank, 
                 leave=False,
                 bar_format=f"rank {_rank} {{l_bar}}{{bar}} {{n_fmt}}/{{total_fmt}}")
+
+def get_device():
+    """Get the current device being used by arceus"""
+    return _device
+
+def get_device_info():
+    """Get information about the current device"""
+    return _device_info
+
+def to_device(obj):
+    """Move object to the current arceus device"""
+    if _device is None:
+        raise RuntimeError("arceus not initialized. Call arceus.init() first.")
+    return move_to_device(obj, _device)
 
 def finish():
     """Clean up distributed training"""

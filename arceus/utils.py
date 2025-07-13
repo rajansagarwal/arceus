@@ -9,7 +9,53 @@ BUCKET_SIZE_KB = int(os.getenv("ARCEUS_BUCKET_KB", "0"))
 # ANSI colors for pretty output
 BOLD = "\033[1m"
 CYAN = "\033[36m"
+GREEN = "\033[32m"
+YELLOW = "\033[33m"
 END = "\033[0m"
+
+def detect_device():
+    import torch
+    
+    # Check for CUDA (NVIDIA GPU)
+    if torch.cuda.is_available():
+        device = torch.device("cuda")
+        device_name = torch.cuda.get_device_name(0)
+        device_info = f"CUDA ({device_name})"
+        return device, device_info
+    
+    # Check for MPS (Apple Silicon)
+    elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+        device = torch.device("mps")
+        device_info = "MPS (Apple Silicon)"
+        return device, device_info
+    
+    # Fallback to CPU
+    else:
+        device = torch.device("cpu")
+        import multiprocessing
+        cpu_count = multiprocessing.cpu_count()
+        device_info = f"CPU ({cpu_count} cores)"
+        return device, device_info
+
+def get_device_backend():
+    import torch
+    
+    if torch.cuda.is_available():
+        return "nccl"  # NCCL is optimal for CUDA
+    else:
+        return "gloo"  # Gloo works for MPS and CPU
+
+def move_to_device(obj, device):
+    try:
+        return obj.to(device)
+    except Exception as e:
+        print(f"{YELLOW}Warning: Could not move to {device}, falling back to CPU{END}")
+        return obj.to("cpu")
+
+def print_device_info(device, device_info, rank=None):
+    """Print device information with rank if specified"""
+    rank_str = f"[Rank {rank}] " if rank is not None else ""
+    print(f"{GREEN}{rank_str}Using device: {device_info}{END}")
 
 def banner(msg):
     print(BOLD + CYAN + msg + END)
@@ -73,6 +119,9 @@ def init_pytorch_distributed(world, rank):
     
     master_ip, master_port = world[0][1]
     
+    # Get appropriate backend for current device
+    backend = get_device_backend()
+    
     # try up to 10 times if ports are busy
     for i in range(10):
         try:
@@ -80,7 +129,7 @@ def init_pytorch_distributed(world, rank):
             os.environ["MASTER_PORT"] = str(master_port)
             
             dist.init_process_group(
-                "gloo",
+                backend,
                 rank=rank,
                 world_size=len(world),
                 init_method=f"tcp://{master_ip}:{master_port}"
