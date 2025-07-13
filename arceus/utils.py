@@ -128,7 +128,10 @@ def init_pytorch_distributed(world, rank):
     # Minimal network configuration for M-series MacBooks
     os.environ["GLOO_SOCKET_FAMILY"] = "AF_INET"  # Force IPv4 only
     os.environ["GLOO_SOCKET_DISABLE_IPV6"] = "1"  # Totally disable IPv6
-    os.environ["GLOO_SOCKET_IFADDR"] = master_ip  # Force gloo to bind this IPv4 address
+    # Bind gloo to this process's own IPv4 address
+    own_ip = world[rank][1][0]
+    os.environ["GLOO_SOCKET_IFADDR"] = own_ip
+    print(f"using gloo socket address: {_mask_ip(own_ip)}")
     
     # Only set interface if user explicitly requests it
     if os.getenv("ARCEUS_IFACE"):
