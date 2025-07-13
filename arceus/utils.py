@@ -178,12 +178,26 @@ def init_pytorch_distributed(world, rank):
     master_ip, master_port = world[0][1]
     backend = get_device_backend()
     
-    # Force PyTorch to use the correct network interface
+    # Force PyTorch to use the correct network interface and IPv4
     interface = os.getenv("ARCEUS_IFACE") or _get_best_interface()
     if interface:
         os.environ["GLOO_SOCKET_IFNAME"] = interface
         os.environ["NCCL_SOCKET_IFNAME"] = interface
         print(f"using network interface: {interface}")
+    
+    # Force IPv4 usage (disable IPv6 which causes link-local issues)
+    os.environ["GLOO_DEVICE_TRANSPORT"] = "TCP"
+    os.environ["TORCH_DISTRIBUTED_DEBUG"] = "OFF"  # Reduce noise
+    
+    # Ensure IPv4-only mode
+    try:
+        import socket
+        # Test if we can bind to IPv4 address
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind((master_ip, 0))  # Test binding to the master IP
+        print(f"confirmed IPv4 connectivity on {_mask_ip(master_ip)}")
+    except Exception as e:
+        print(f"warning: IPv4 binding test failed: {e}")
     
     def _mask_ip(ip):
         """Mask IP address for privacy"""
@@ -214,11 +228,17 @@ def init_pytorch_distributed(world, rank):
             import datetime
             timeout = datetime.timedelta(seconds=10)
             
+            # Force IPv4 at system level
+            os.environ["GLOO_SOCKET_FAMILY"] = "AF_INET"  # Force IPv4
+            
+            init_method = f"tcp://{master_ip}:{master_port}"
+            print(f"  using init method: tcp://{_mask_ip(master_ip)}:{master_port}")
+            
             dist.init_process_group(
                 backend,
                 rank=rank,
                 world_size=len(world),
-                init_method=f"tcp://{master_ip}:{master_port}",
+                init_method=init_method,
                 timeout=timeout
             )
             print(f"✓ distributed training initialized successfully")
