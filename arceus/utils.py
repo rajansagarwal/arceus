@@ -109,67 +109,7 @@ def parse_cli_args():
     
     return mode, session, args
 
-def _get_best_interface():
-    """Find the best network interface for distributed training"""
-    import socket
-    import subprocess
-    
-    try:
-        # Get the local IP used for external connectivity
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-            s.connect(("8.8.8.8", 80))
-            local_ip = s.getsockname()[0]
-        
-        # Skip if using loopback
-        if local_ip.startswith('127.'):
-            return None
-            
-        # Method 1: macOS - use route command
-        if os.name != 'nt':
-            try:
-                result = subprocess.run(['route', 'get', '8.8.8.8'], 
-                                      capture_output=True, text=True, timeout=2)
-                for line in result.stdout.split('\n'):
-                    if 'interface:' in line:
-                        iface = line.split(':')[1].strip()
-                        print(f"detected interface via route: {iface}")
-                        return iface
-            except:
-                pass
-        
-        # Method 2: Parse ifconfig/ipconfig to map IP to interface
-        if os.name == 'nt':  # Windows
-            try:
-                result = subprocess.run(['ipconfig'], capture_output=True, text=True, timeout=2)
-                current_iface = None
-                for line in result.stdout.split('\n'):
-                    line = line.strip()
-                    if 'adapter' in line.lower():
-                        current_iface = line
-                    elif f'IPv4 Address' in line and local_ip in line and current_iface:
-                        # Extract interface name
-                        iface = current_iface.split('adapter ')[-1].rstrip(':')
-                        print(f"detected interface via ipconfig: {iface}")
-                        return iface
-            except:
-                pass
-        else:  # Unix/macOS
-            try:
-                result = subprocess.run(['ifconfig'], capture_output=True, text=True, timeout=2)
-                current_iface = None
-                for line in result.stdout.split('\n'):
-                    if line and not line.startswith('\t') and not line.startswith(' '):
-                        current_iface = line.split(':')[0]
-                    elif f'inet {local_ip}' in line and current_iface:
-                        print(f"detected interface via ifconfig: {current_iface}")
-                        return current_iface
-            except:
-                pass
-                    
-    except Exception as e:
-        print(f"interface detection failed: {e}")
-    
-    return None
+
 
 def init_pytorch_distributed(world, rank):
     import torch.distributed as dist
@@ -178,33 +118,20 @@ def init_pytorch_distributed(world, rank):
     master_ip, master_port = world[0][1]
     backend = get_device_backend()
     
-    # Force PyTorch to use the correct network interface and IPv4
-    interface = os.getenv("ARCEUS_IFACE") or _get_best_interface()
-    if interface:
-        os.environ["GLOO_SOCKET_IFNAME"] = interface
-        os.environ["NCCL_SOCKET_IFNAME"] = interface
-        print(f"using network interface: {interface}")
-    
-    # Force IPv4 usage (disable IPv6 which causes link-local issues)
-    os.environ["GLOO_DEVICE_TRANSPORT"] = "TCP"
-    os.environ["TORCH_DISTRIBUTED_DEBUG"] = "OFF"  # Reduce noise
-    
-    # Ensure IPv4-only mode
-    try:
-        import socket
-        # Test if we can bind to IPv4 address
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.bind((master_ip, 0))  # Test binding to the master IP
-        print(f"confirmed IPv4 connectivity on {_mask_ip(master_ip)}")
-    except Exception as e:
-        print(f"warning: IPv4 binding test failed: {e}")
-    
     def _mask_ip(ip):
         """Mask IP address for privacy"""
         parts = ip.split('.')
         if len(parts) == 4:
             return f"{parts[0]}.{parts[1]}.xxx.xxx"
         return "xxx.xxx.xxx.xxx"
+    
+    # Minimal network configuration for M-series MacBooks
+    os.environ["GLOO_SOCKET_FAMILY"] = "AF_INET"  # Force IPv4 only
+    
+    # Only set interface if user explicitly requests it
+    if os.getenv("ARCEUS_IFACE"):
+        os.environ["GLOO_SOCKET_IFNAME"] = os.getenv("ARCEUS_IFACE")
+        print(f"using forced interface: {os.getenv('ARCEUS_IFACE')}")
     
     print(f"initializing distributed training...")
     print(f"  backend: {backend}")
@@ -228,9 +155,6 @@ def init_pytorch_distributed(world, rank):
             import datetime
             timeout = datetime.timedelta(seconds=10)
             
-            # Force IPv4 at system level
-            os.environ["GLOO_SOCKET_FAMILY"] = "AF_INET"  # Force IPv4
-            
             init_method = f"tcp://{master_ip}:{master_port}"
             print(f"  using init method: tcp://{_mask_ip(master_ip)}:{master_port}")
             
@@ -249,13 +173,19 @@ def init_pytorch_distributed(world, rank):
             if "timeout" in error_str:
                 print(f"✗ attempt {attempt + 1} timed out after 10s")
                 if attempt == 2:  # Last attempt
-                    print("\n🔥 NETWORK CONNECTIVITY ISSUE 🔥")
                     print("Common fixes:")
                     print("1. Disable macOS firewall temporarily: System Settings → Network → Firewall")
                     print("2. Check router settings - disable 'client isolation' or 'AP isolation'")  
                     print("3. Ensure both devices are on the same WiFi network")
                     print(f"4. Try manual port: python train.py --host --port 8080")
                     raise RuntimeError("distributed training initialization timed out - check network connectivity")
+                continue
+            elif "unsupported gloo device" in error_str or "makedeviceforinterface" in error_str:
+                print(f"✗ gloo interface issue, trying with default settings...")
+                # Clear problematic environment variables and retry with defaults
+                for env_var in ["GLOO_SOCKET_IFNAME", "GLOO_SOCKET_FAMILY", "NCCL_SOCKET_IFNAME"]:
+                    if env_var in os.environ:
+                        del os.environ[env_var]
                 continue
             elif "connection refused" in error_str or "connection failed" in error_str:
                 print(f"✗ connection refused - firewall is likely blocking port {master_port}")
