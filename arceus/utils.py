@@ -89,6 +89,7 @@ def parse_cli_args():
     group.add_argument("--join", nargs="?", const=True, default=False, help="Join session")
     parser.add_argument("--timeout", type=int, default=5, help="Discovery timeout")
     parser.add_argument("--epochs", type=int, default=2, help="Number of epochs")
+    parser.add_argument("--port", type=int, default=int(os.getenv("ARCEUS_MASTER_PORT", "29500")), help="Master port for PyTorch distributed (host)")
     
     args = parser.parse_args()
     

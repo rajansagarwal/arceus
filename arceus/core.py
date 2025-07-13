@@ -14,7 +14,7 @@ _world = None
 _device = None
 _device_info = None
 
-def init(mode="auto", session=None, timeout=5):
+def init(mode="auto", session=None, timeout=5, port=None):
     global _beacon, _rank, _world, _device, _device_info
     
     _beacon = UDPBeacon("DISC", 0)
@@ -43,8 +43,12 @@ def init(mode="auto", session=None, timeout=5):
         session = pick_session(sessions)
     
     if mode == "host":
+        if port is None:
+            import os
+            port = int(os.getenv("ARCEUS_MASTER_PORT", "29500"))
+
         session_id = uuid.uuid4().hex[:4].upper()
-        host = TrainingHost(session_id)
+        host = TrainingHost(session_id, port)
         
         _beacon.stop()
         _beacon = UDPBeacon(session_id, host.tcp_port)
@@ -206,7 +210,7 @@ def cli():
     from .utils import parse_cli_args
     
     mode, session, args = parse_cli_args()
-    rank, world_size = init(mode, session, args.timeout)
+    rank, world_size = init(mode, session, args.timeout, args.port)
     return rank, world_size, args 
 
 def get_learning_rate(optimizer):

@@ -10,10 +10,10 @@ from .networking import get_local_ip, find_free_port
 class TrainingHost:
     """Host side of distributed training setup"""
     
-    def __init__(self, session_id):
+    def __init__(self, session_id, master_port):
         self.session_id = session_id
         self.tcp_port = find_free_port()
-        self.master_port = find_free_port()  # for PyTorch distributed
+        self.master_port = master_port  # fixed port for PyTorch distributed
         self.host_uuid = str(uuid.uuid4())
         
         # TCP server to accept joiner connections
