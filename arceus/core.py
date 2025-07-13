@@ -5,7 +5,8 @@ from .networking import UDPBeacon
 from .distributed import TrainingHost, TrainingJoiner
 from .progress import MetricProgressBar
 from .utils import (banner, wait_for_sessions, pick_session, init_pytorch_distributed, 
-                   detect_device, print_device_info, move_to_device, BOLD, END)
+                   detect_device, print_device_info, move_to_device, setup_macos_gloo_env, 
+                   validate_gloo_setup, BOLD, END)
 
 # Global state
 _beacon = None
@@ -216,4 +217,12 @@ def cli():
 def get_learning_rate(optimizer):
     for param_group in optimizer.param_groups:
         return param_group['lr']
-    return 0.0 
+    return 0.0
+
+def setup_macos_env():
+    """Set up macOS-safe Gloo environment variables (convenience wrapper)"""
+    return setup_macos_gloo_env()
+
+def validate_gloo():
+    """Quick validation of Gloo setup (convenience wrapper)"""
+    return validate_gloo_setup() 

@@ -111,6 +111,50 @@ def parse_cli_args():
 
 
 
+def setup_macos_gloo_env():
+    """Set up macOS-safe Gloo environment variables"""
+    import subprocess
+    
+    # Get Wi-Fi interface IP address
+    try:
+        result = subprocess.run(['ipconfig', 'getifaddr', 'en0'], 
+                              capture_output=True, text=True, check=True)
+        wifi_ip = result.stdout.strip()
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        print("Warning: Could not get en0 IP address, using localhost")
+        wifi_ip = "127.0.0.1"
+    
+    # Set the 5-variable safety net
+    os.environ.setdefault("ARCEUS_MASTER_PORT", "29500")
+    os.environ.setdefault("GLOO_SOCKET_FAMILY", "AF_INET")
+    os.environ.setdefault("GLOO_SOCKET_DISABLE_IPV6", "1")
+    os.environ.setdefault("GLOO_SOCKET_IFNAME", "en0")
+    os.environ.setdefault("GLOO_SOCKET_IFADDR", wifi_ip)
+    os.environ.setdefault("GLOO_ALLOW_UNSECURED", "1")
+    
+    print(f"✓ macOS Gloo environment configured (IP: {wifi_ip})")
+    return wifi_ip
+
+def validate_gloo_setup():
+    """Quick validation of Gloo setup before running full distributed training"""
+    import torch
+    import torch.distributed as dist
+    
+    try:
+        # Test single-rank Gloo initialization
+        dist.init_process_group(
+            backend="gloo",
+            rank=0,
+            world_size=1,
+            init_method=f"tcp://{os.environ.get('GLOO_SOCKET_IFADDR', '127.0.0.1')}:29500",
+        )
+        print("✓ Gloo single-rank validation passed")
+        dist.destroy_process_group()
+        return True
+    except Exception as e:
+        print(f"✗ Gloo validation failed: {e}")
+        return False
+
 def init_pytorch_distributed(world, rank):
     import torch.distributed as dist
     from .networking import find_free_port
@@ -125,11 +169,15 @@ def init_pytorch_distributed(world, rank):
             return f"{parts[0]}.{parts[1]}.xxx.xxx"
         return "xxx.xxx.xxx.xxx"
     
-    # --- Mac-friendly Gloo setup ---------------------------------
-    os.environ["GLOO_SOCKET_FAMILY"] = "AF_INET"     # IPv4 only
-    os.environ["GLOO_SOCKET_IFNAME"] = "en0"         # bind to Wi-Fi
-    os.environ["GLOO_ALLOW_UNSECURED"] = "1"         # skip stealth-mode RST
-    print("using Gloo on interface en0 (IPv4), unsecured mode")
+    # --- Harden Gloo against macOS firewall / IPv6 quirks ----------
+    if backend == "gloo":
+        os.environ.setdefault("GLOO_SOCKET_FAMILY", "AF_INET")
+        os.environ.setdefault("GLOO_SOCKET_DISABLE_IPV6", "1")      # block fe80::* picks
+        ipaddr = world[rank][1][0]                                  # my v4 address
+        os.environ.setdefault("GLOO_SOCKET_IFADDR", ipaddr)
+        os.environ.setdefault("GLOO_SOCKET_IFNAME", "en0")          # bind to Wi-Fi
+        os.environ.setdefault("GLOO_ALLOW_UNSECURED", "1")          # skip stealth-mode RST
+        print(f"using Gloo on en0 (IPv4), address: {_mask_ip(ipaddr)}, unsecured mode")
     
     print(f"initializing distributed training...")
     print(f"  backend: {backend}")
@@ -174,7 +222,8 @@ def init_pytorch_distributed(world, rank):
                     print("Common fixes:")
                     print("1. Ensure both devices are on the same WiFi network")
                     print("2. Check router settings - disable 'client isolation' or 'AP isolation'")  
-                    print("3. Try different port: python train.py --host --port 8080")
+                    print("3. Allow Python in macOS Firewall: System Settings → Network → Firewall")
+                    print("4. Try different port: python train.py --host --port 8080")
                     raise RuntimeError("distributed training initialization timed out - check network connectivity")
                 continue
             elif "unsupported gloo device" in error_str or "makedeviceforinterface" in error_str:
