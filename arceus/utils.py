@@ -16,20 +16,17 @@ END = "\033[0m"
 def detect_device():
     import torch
     
-    # Check for CUDA (NVIDIA GPU)
     if torch.cuda.is_available():
         device = torch.device("cuda")
         device_name = torch.cuda.get_device_name(0)
         device_info = f"CUDA ({device_name})"
         return device, device_info
     
-    # Check for MPS (Apple Silicon)
     elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
         device = torch.device("mps")
         device_info = "MPS (Apple Silicon)"
         return device, device_info
     
-    # Fallback to CPU
     else:
         device = torch.device("cpu")
         import multiprocessing
@@ -41,9 +38,9 @@ def get_device_backend():
     import torch
     
     if torch.cuda.is_available():
-        return "nccl"  # NCCL is optimal for CUDA
+        return "nccl"
     else:
-        return "gloo"  # Gloo works for MPS and CPU
+        return "gloo"
 
 def move_to_device(obj, device):
     try:
@@ -53,7 +50,6 @@ def move_to_device(obj, device):
         return obj.to("cpu")
 
 def print_device_info(device, device_info, rank=None):
-    """Print device information with rank if specified"""
     rank_str = f"[Rank {rank}] " if rank is not None else ""
     print(f"{GREEN}{rank_str}Using device: {device_info}{END}")
 

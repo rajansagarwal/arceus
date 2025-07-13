@@ -44,7 +44,7 @@ dataloader = DataLoader(DummyDataset(), batch_size=128, shuffle=True)
 
 # training loop
 for epoch in range(args.epochs):
-    progress_bar = arceus.progress(dataloader)
+    progress_bar = arceus.progress(dataloader, optimizer)
     
     for data, target in progress_bar:
         data, target = arceus.to_device(data), arceus.to_device(target)
@@ -61,6 +61,9 @@ for epoch in range(args.epochs):
         
         loss.backward()
         optimizer.step()
+        
+        # metrics are captured automatically! pass whatever you want to track
+        progress_bar.step(loss=loss)
     
     # only rank 0 prints epoch completion
     if rank == 0:

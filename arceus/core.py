@@ -3,6 +3,7 @@ import uuid
 
 from .networking import UDPBeacon
 from .distributed import TrainingHost, TrainingJoiner
+from .progress import MetricProgressBar
 from .utils import (banner, wait_for_sessions, pick_session, init_pytorch_distributed, 
                    detect_device, print_device_info, move_to_device, BOLD, END)
 
@@ -14,29 +15,27 @@ _device = None
 _device_info = None
 
 def init(mode="auto", session=None, timeout=5):
-    """
-    Initialize distributed training
+    global _beacon, _rank, _world, _device, _device_info
     
-    mode: "host", "join", or "auto" 
-    session: session ID to join (for join mode)
-    timeout: how long to wait for session discovery
-    
-    Returns (rank, world_size)
-    """
-    global _beacon, _rank, _world
-    
-    # start discovery beacon
     _beacon = UDPBeacon("DISC", 0)
-    time.sleep(0.3)  # give it a moment to start up
+    time.sleep(0.3)
     
-    # figure out what to do
+    # decide whether to host or join
     if mode == "auto":
         sessions = wait_for_sessions(_beacon, timeout)
         if sessions:
             mode = "join"
             session = pick_session(sessions)
         else:
-            mode = "host"  # nobody else around, we'll be host
+            # No sessions found, run in single-process mode
+            _beacon.stop()
+            _world = [(str(uuid.uuid4()), ("localhost", 0))]
+            _rank = 0
+            
+            _device, _device_info = detect_device()
+            print_device_info(_device, _device_info, _rank)
+            
+            return _rank, len(_world)
     elif mode == "join" and session is None:
         sessions = wait_for_sessions(_beacon, timeout)
         if not sessions:
@@ -44,11 +43,9 @@ def init(mode="auto", session=None, timeout=5):
         session = pick_session(sessions)
     
     if mode == "host":
-        # Generate random session ID
         session_id = uuid.uuid4().hex[:4].upper()
         host = TrainingHost(session_id)
         
-        # Stop discovery beacon and start advertising our session
         _beacon.stop()
         _beacon = UDPBeacon(session_id, host.tcp_port)
         
@@ -91,18 +88,16 @@ def init(mode="auto", session=None, timeout=5):
         
         print(f"Training starting as rank {_rank}/{len(_world)}")
     
-    # Initialize PyTorch distributed
-    init_pytorch_distributed(_world, _rank)
+    # Only initialize distributed if we have multiple processes
+    if len(_world) > 1:
+        init_pytorch_distributed(_world, _rank)
     
-    # Detect and set up device
-    global _device, _device_info
     _device, _device_info = detect_device()
     print_device_info(_device, _device_info, _rank)
     
     return _rank, len(_world)
 
 def wrap(model, show_graph=False, auto_device=True):
-    """add distributed gradient averaging hooks to model and handle device placement"""
     import torch
     import torch.fx
     
@@ -110,25 +105,18 @@ def wrap(model, show_graph=False, auto_device=True):
         print("=== Model Graph ===")
         print(torch.fx.symbolic_trace(model).graph)
     
-    # Move model to detected device if auto_device is enabled
     if auto_device and _device is not None:
         model = move_to_device(model, _device)
     
-    # single process, nothing to do for distributed training
     if len(_world) == 1:
         return model
     
-    # hook to average gradients across all ranks
     def grad_hook(grad):
-        import torch
-        # For CUDA, keep gradients on GPU during allreduce if possible
         if _device.type == "cuda" and torch.distributed.get_backend() == "nccl":
-            # NCCL can handle GPU tensors directly
             torch.distributed.all_reduce(grad)
             grad /= len(_world)
             return grad
         else:
-            # For MPS/CPU, move to CPU for allreduce
             g_cpu = grad.detach().cpu()
             torch.distributed.all_reduce(g_cpu)
             g_cpu /= len(_world)
@@ -138,10 +126,8 @@ def wrap(model, show_graph=False, auto_device=True):
         if p.requires_grad:
             p.register_hook(grad_hook)
     
-    # sync initial weights so everyone starts the same
-    import torch
+    # sync initial weights
     for p in model.parameters():
-        # For CUDA with NCCL, broadcast on GPU; otherwise use CPU
         if _device.type == "cuda" and torch.distributed.get_backend() == "nccl":
             torch.distributed.broadcast(p.data, src=0)
         else:
@@ -151,39 +137,35 @@ def wrap(model, show_graph=False, auto_device=True):
     
     return model
 
-def progress(dataloader):
-    """Create a progress bar for the dataloader"""
-    from tqdm import tqdm
-    return tqdm(dataloader, 
-                position=_rank, 
-                leave=False,
-                bar_format=f"rank {_rank} {{l_bar}}{{bar}} {{n_fmt}}/{{total_fmt}}")
+def progress(dataloader, optimizer=None):
+    return MetricProgressBar(dataloader, _rank, len(_world), _device, optimizer)
 
 def get_device():
-    """Get the current device being used by arceus"""
     return _device
 
 def get_device_info():
-    """Get information about the current device"""
     return _device_info
 
 def to_device(obj):
-    """Move object to the current arceus device"""
     if _device is None:
         raise RuntimeError("arceus not initialized. Call arceus.init() first.")
     return move_to_device(obj, _device)
 
 def finish():
-    """Clean up distributed training"""
     import torch.distributed as dist
-    dist.destroy_process_group()
+    if dist.is_initialized():
+        dist.destroy_process_group()
     if _beacon:
         _beacon.stop()
 
 def cli():
-    """Parse command line arguments and initialize"""
     from .utils import parse_cli_args
     
     mode, session, args = parse_cli_args()
     rank, world_size = init(mode, session, args.timeout)
     return rank, world_size, args 
+
+def get_learning_rate(optimizer):
+    for param_group in optimizer.param_groups:
+        return param_group['lr']
+    return 0.0 
