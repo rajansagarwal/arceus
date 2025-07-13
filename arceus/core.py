@@ -167,13 +167,17 @@ def wrap(model, show_graph=False, auto_device=True):
             p.register_hook(grad_hook)
     
     # sync initial weights
+    print("synchronizing model parameters...")
+    param_count = 0
     for p in model.parameters():
+        param_count += 1
         if _device.type == "cuda" and torch.distributed.get_backend() == "nccl":
             torch.distributed.broadcast(p.data, src=0)
         else:
             p_cpu = p.data.cpu()
             torch.distributed.broadcast(p_cpu, src=0)
             p.data.copy_(p_cpu.to(p.device))
+    print(f"✓ synchronized {param_count} parameter tensors")
     
     return model
 
