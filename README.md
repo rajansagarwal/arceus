@@ -5,9 +5,17 @@ distributed training across m-series macbooks for pytorch ml models
 all you have to do is 
 
 ```python
-import arceus
 ...
-model = arceus.wrap(model)
+import torch
+import torch.nn as nn
+import arceus
+
+class NeuralNetwork(nn.Module):
+    # your network architecture
+
+...
+model = NeuralNetwork()
+model = arceus.wrap(model) # add this line
 ...
 ```
 
