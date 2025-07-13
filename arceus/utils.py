@@ -125,18 +125,11 @@ def init_pytorch_distributed(world, rank):
             return f"{parts[0]}.{parts[1]}.xxx.xxx"
         return "xxx.xxx.xxx.xxx"
     
-    # Minimal network configuration for M-series MacBooks
-    os.environ["GLOO_SOCKET_FAMILY"] = "AF_INET"  # Force IPv4 only
-    os.environ["GLOO_SOCKET_DISABLE_IPV6"] = "1"  # Totally disable IPv6
-    # Bind gloo to this process's own IPv4 address
-    own_ip = world[rank][1][0]
-    os.environ["GLOO_SOCKET_IFADDR"] = own_ip
-    print(f"using gloo socket address: {_mask_ip(own_ip)}")
-    
-    # Only set interface if user explicitly requests it
-    if os.getenv("ARCEUS_IFACE"):
-        os.environ["GLOO_SOCKET_IFNAME"] = os.getenv("ARCEUS_IFACE")
-        print(f"using forced interface: {os.getenv('ARCEUS_IFACE')}")
+    # --- Mac-friendly Gloo setup ---------------------------------
+    os.environ["GLOO_SOCKET_FAMILY"] = "AF_INET"     # IPv4 only
+    os.environ["GLOO_SOCKET_IFNAME"] = "en0"         # bind to Wi-Fi
+    os.environ["GLOO_ALLOW_UNSECURED"] = "1"         # skip stealth-mode RST
+    print("using Gloo on interface en0 (IPv4), unsecured mode")
     
     print(f"initializing distributed training...")
     print(f"  backend: {backend}")
@@ -179,19 +172,14 @@ def init_pytorch_distributed(world, rank):
                 print(f"✗ attempt {attempt + 1} timed out after 10s")
                 if attempt == 2:  # Last attempt
                     print("Common fixes:")
-                    print("1. Disable macOS firewall temporarily: System Settings → Network → Firewall")
+                    print("1. Ensure both devices are on the same WiFi network")
                     print("2. Check router settings - disable 'client isolation' or 'AP isolation'")  
-                    print("3. Ensure both devices are on the same WiFi network")
-                    print(f"4. Try manual port: python train.py --host --port 8080")
+                    print("3. Try different port: python train.py --host --port 8080")
                     raise RuntimeError("distributed training initialization timed out - check network connectivity")
                 continue
             elif "unsupported gloo device" in error_str or "makedeviceforinterface" in error_str:
-                print(f"✗ gloo interface issue, trying with default settings...")
-                # Clear problematic environment variables and retry with defaults
-                for env_var in ["GLOO_SOCKET_IFNAME", "GLOO_SOCKET_FAMILY", "NCCL_SOCKET_IFNAME"]:
-                    if env_var in os.environ:
-                        del os.environ[env_var]
-                continue
+                print(f"✗ gloo interface issue - check network interface")
+                raise
             elif "connection refused" in error_str or "connection failed" in error_str:
                 print(f"✗ connection refused - firewall is likely blocking port {master_port}")
                 raise
