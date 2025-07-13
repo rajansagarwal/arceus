@@ -128,6 +128,7 @@ def init_pytorch_distributed(world, rank):
     # Minimal network configuration for M-series MacBooks
     os.environ["GLOO_SOCKET_FAMILY"] = "AF_INET"  # Force IPv4 only
     os.environ["GLOO_SOCKET_DISABLE_IPV6"] = "1"  # Totally disable IPv6
+    os.environ["GLOO_SOCKET_IFADDR"] = master_ip  # Force gloo to bind this IPv4 address
     
     # Only set interface if user explicitly requests it
     if os.getenv("ARCEUS_IFACE"):
