@@ -109,12 +109,81 @@ def parse_cli_args():
     
     return mode, session, args
 
+def _get_best_interface():
+    """Find the best network interface for distributed training"""
+    import socket
+    import subprocess
+    
+    try:
+        # Get the local IP used for external connectivity
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("8.8.8.8", 80))
+            local_ip = s.getsockname()[0]
+        
+        # Skip if using loopback
+        if local_ip.startswith('127.'):
+            return None
+            
+        # Method 1: macOS - use route command
+        if os.name != 'nt':
+            try:
+                result = subprocess.run(['route', 'get', '8.8.8.8'], 
+                                      capture_output=True, text=True, timeout=2)
+                for line in result.stdout.split('\n'):
+                    if 'interface:' in line:
+                        iface = line.split(':')[1].strip()
+                        print(f"detected interface via route: {iface}")
+                        return iface
+            except:
+                pass
+        
+        # Method 2: Parse ifconfig/ipconfig to map IP to interface
+        if os.name == 'nt':  # Windows
+            try:
+                result = subprocess.run(['ipconfig'], capture_output=True, text=True, timeout=2)
+                current_iface = None
+                for line in result.stdout.split('\n'):
+                    line = line.strip()
+                    if 'adapter' in line.lower():
+                        current_iface = line
+                    elif f'IPv4 Address' in line and local_ip in line and current_iface:
+                        # Extract interface name
+                        iface = current_iface.split('adapter ')[-1].rstrip(':')
+                        print(f"detected interface via ipconfig: {iface}")
+                        return iface
+            except:
+                pass
+        else:  # Unix/macOS
+            try:
+                result = subprocess.run(['ifconfig'], capture_output=True, text=True, timeout=2)
+                current_iface = None
+                for line in result.stdout.split('\n'):
+                    if line and not line.startswith('\t') and not line.startswith(' '):
+                        current_iface = line.split(':')[0]
+                    elif f'inet {local_ip}' in line and current_iface:
+                        print(f"detected interface via ifconfig: {current_iface}")
+                        return current_iface
+            except:
+                pass
+                    
+    except Exception as e:
+        print(f"interface detection failed: {e}")
+    
+    return None
+
 def init_pytorch_distributed(world, rank):
     import torch.distributed as dist
     from .networking import find_free_port
     
     master_ip, master_port = world[0][1]
     backend = get_device_backend()
+    
+    # Force PyTorch to use the correct network interface
+    interface = os.getenv("ARCEUS_IFACE") or _get_best_interface()
+    if interface:
+        os.environ["GLOO_SOCKET_IFNAME"] = interface
+        os.environ["NCCL_SOCKET_IFNAME"] = interface
+        print(f"using network interface: {interface}")
     
     def _mask_ip(ip):
         """Mask IP address for privacy"""
