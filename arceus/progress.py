@@ -13,9 +13,9 @@ class MetricProgressBar:
         self.batch_count = 0
         
         if self.is_host:
-            bar_format = f"host (aggregated) {{l_bar}}{{bar}} {{n_fmt}}/{{total_fmt}} | {{postfix}}"
+            bar_format = f"host (aggregated) {{l_bar}}{{bar}} {{n_fmt}}/{{total_fmt}} {{postfix}}"
         else:
-            bar_format = f"rank {rank} {{l_bar}}{{bar}} {{n_fmt}}/{{total_fmt}} | {{postfix}}"
+            bar_format = f"rank {rank} {{l_bar}}{{bar}} {{n_fmt}}/{{total_fmt}} {{postfix}}"
         
         self.pbar = tqdm(dataloader, 
                         position=rank, 
@@ -101,7 +101,10 @@ class MetricProgressBar:
                     formatted.append(f"{key}: {value:.2e}")
             else:
                 formatted.append(f"{key}: {value}")
-        return " | ".join(formatted)
+        
+        if formatted:
+            return " | " + " | ".join(formatted)
+        return ""
     
     def __iter__(self):
         return iter(self.pbar)
