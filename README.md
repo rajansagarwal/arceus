@@ -12,8 +12,8 @@ import torch.nn as nn
 import torch.optim as optim
 import arceus
 
-# Initialize arceus (automatically detects best device)
-rank, world_size = arceus.init()
+# initialize arceus (automatically detects best device)
+rank, world_size, args = arceus.init()
 
 class NeuralNetwork(nn.Module):
     # your network architecture
