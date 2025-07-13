@@ -37,9 +37,13 @@ class TrainingHost:
                     continue
                 
                 client_sock, addr = self.server_sock.accept()
-                client_id = client_sock.recv(64).decode()
+                # receive client_id and their IP address
+                data = client_sock.recv(256).decode()
+                parts = data.split(':')
+                client_id = parts[0]
+                client_ip = parts[1] if len(parts) > 1 else addr[0]
                 
-                self.clients[client_id] = client_sock
+                self.clients[client_id] = (client_sock, client_ip)
                 print(f"✅ Peer joined: {client_id[:8]}...")
                 
             except OSError:
@@ -52,9 +56,10 @@ class TrainingHost:
         # build world list - host is always rank 0
         world = [(self.host_uuid, (get_local_ip(), self.master_port))]
         
-        # add all the joiners
+        # add all the joiners with their actual IP addresses
         for client_id in sorted(self.clients.keys()):
-            world.append((client_id, (get_local_ip(), self.master_port)))
+            sock, client_ip = self.clients[client_id]
+            world.append((client_id, (client_ip, self.master_port)))
         
         # tell everyone to start
         msg = json.dumps({
@@ -62,7 +67,7 @@ class TrainingHost:
             "world": world
         }).encode()
         
-        for sock in self.clients.values():
+        for client_id, (sock, _) in self.clients.items():
             try:
                 sock.sendall(msg)
                 sock.close()
@@ -85,7 +90,12 @@ class TrainingJoiner:
         # connect to host and register ourselves
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.sock.connect((self.host_ip, self.host_port))
-        self.sock.send(self.my_id.encode())
+        
+        # send our ID and IP address
+        from .networking import get_local_ip
+        my_ip = get_local_ip()
+        data = f"{self.my_id}:{my_ip}"
+        self.sock.send(data.encode())
         # connected but don't wait for start yet
     
     def wait_for_start(self):

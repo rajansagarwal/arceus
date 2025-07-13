@@ -115,9 +115,16 @@ def init_pytorch_distributed(world, rank):
     master_ip, master_port = world[0][1]
     backend = get_device_backend()
     
+    def _mask_ip(ip):
+        """Mask IP address for privacy"""
+        parts = ip.split('.')
+        if len(parts) == 4:
+            return f"{parts[0]}.{parts[1]}.xxx.xxx"
+        return "xxx.xxx.xxx.xxx"
+    
     print(f"initializing distributed training...")
     print(f"  backend: {backend}")
-    print(f"  master: {master_ip}:{master_port}")
+    print(f"  master: {_mask_ip(master_ip)}:{master_port}")
     print(f"  rank: {rank}/{len(world)}")
     
     for i in range(10):
