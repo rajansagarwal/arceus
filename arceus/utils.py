@@ -127,15 +127,23 @@ def init_pytorch_distributed(world, rank):
     print(f"  backend: {backend}")
     print(f"  master: {_mask_ip(master_ip)}:{master_port}")
     print(f"  rank: {rank}/{len(world)}")
+    print(f"  world: {[(uuid[:8], _mask_ip(ip)) for uuid, (ip, port) in world]}")
     
-    for i in range(10):
+    if rank == 0:
+        print(f"  → rank 0 will LISTEN on port {master_port}")
+    else:
+        print(f"  → rank {rank} will CONNECT to {_mask_ip(master_ip)}:{master_port}")
+    
+    for attempt in range(3):  # Reduced attempts
         try:
             os.environ["MASTER_ADDR"] = master_ip
             os.environ["MASTER_PORT"] = str(master_port)
             
-            # Add timeout to prevent hanging
+            print(f"  attempt {attempt + 1}/3: calling dist.init_process_group...")
+            
+            # Reduced timeout for faster feedback
             import datetime
-            timeout = datetime.timedelta(seconds=30)
+            timeout = datetime.timedelta(seconds=10)
             
             dist.init_process_group(
                 backend,
@@ -150,10 +158,18 @@ def init_pytorch_distributed(world, rank):
         except RuntimeError as e:
             error_str = str(e).lower()
             if "timeout" in error_str:
-                print(f"✗ connection timeout - check network connectivity between devices")
-                raise
+                print(f"✗ attempt {attempt + 1} timed out after 10s")
+                if attempt == 2:  # Last attempt
+                    print("\n🔥 NETWORK CONNECTIVITY ISSUE 🔥")
+                    print("Common fixes:")
+                    print("1. Disable macOS firewall temporarily: System Settings → Network → Firewall")
+                    print("2. Check router settings - disable 'client isolation' or 'AP isolation'")  
+                    print("3. Ensure both devices are on the same WiFi network")
+                    print(f"4. Try manual port: python train.py --host --port 8080")
+                    raise RuntimeError("distributed training initialization timed out - check network connectivity")
+                continue
             elif "connection refused" in error_str or "connection failed" in error_str:
-                print(f"✗ connection refused - check firewall settings")
+                print(f"✗ connection refused - firewall is likely blocking port {master_port}")
                 raise
             elif "eaddrinuse" in error_str:
                 print(f"  port {master_port} busy, trying another...")
@@ -163,4 +179,4 @@ def init_pytorch_distributed(world, rank):
                 print(f"✗ distributed init failed: {e}")
                 raise
     
-    raise RuntimeError("couldn't initialize distributed training after 10 port attempts") 
+    raise RuntimeError("couldn't initialize distributed training after 3 attempts") 
