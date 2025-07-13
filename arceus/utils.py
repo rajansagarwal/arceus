@@ -109,33 +109,50 @@ def parse_cli_args():
     return mode, session, args
 
 def init_pytorch_distributed(world, rank):
-    # set up PyTorch distributed, retry if port conflicts
     import torch.distributed as dist
     from .networking import find_free_port
     
     master_ip, master_port = world[0][1]
-    
-    # Get appropriate backend for current device
     backend = get_device_backend()
     
-    # try up to 10 times if ports are busy
+    print(f"initializing distributed training...")
+    print(f"  backend: {backend}")
+    print(f"  master: {master_ip}:{master_port}")
+    print(f"  rank: {rank}/{len(world)}")
+    
     for i in range(10):
         try:
             os.environ["MASTER_ADDR"] = master_ip
             os.environ["MASTER_PORT"] = str(master_port)
             
+            # Add timeout to prevent hanging
+            import datetime
+            timeout = datetime.timedelta(seconds=30)
+            
             dist.init_process_group(
                 backend,
                 rank=rank,
                 world_size=len(world),
-                init_method=f"tcp://{master_ip}:{master_port}"
+                init_method=f"tcp://{master_ip}:{master_port}",
+                timeout=timeout
             )
-            return  # success!
+            print(f"✓ distributed training initialized successfully")
+            return
             
         except RuntimeError as e:
-            if "EADDRINUSE" not in str(e):
-                raise  # some other error
-            # port busy, try another one
-            master_port = find_free_port()
+            error_str = str(e).lower()
+            if "timeout" in error_str:
+                print(f"✗ connection timeout - check network connectivity between devices")
+                raise
+            elif "connection refused" in error_str or "connection failed" in error_str:
+                print(f"✗ connection refused - check firewall settings")
+                raise
+            elif "eaddrinuse" in error_str:
+                print(f"  port {master_port} busy, trying another...")
+                master_port = find_free_port()
+                continue
+            else:
+                print(f"✗ distributed init failed: {e}")
+                raise
     
-    raise RuntimeError("Couldn't init PyTorch distributed after 10 tries") 
+    raise RuntimeError("couldn't initialize distributed training after 10 port attempts") 
