@@ -97,13 +97,53 @@ def init(mode="auto", session=None, timeout=5):
     
     return _rank, len(_world)
 
+def _print_model_summary(model):
+    """Print a clean, compact model summary"""
+    from .utils import CYAN, BOLD, END
+    
+    print(f"{CYAN}{BOLD}model summary{END}")
+    
+    total_params = 0
+    trainable_params = 0
+    
+    for name, module in model.named_modules():
+        if len(list(module.children())) == 0:  # leaf modules only
+            param_count = sum(p.numel() for p in module.parameters())
+            trainable_count = sum(p.numel() for p in module.parameters() if p.requires_grad)
+            
+            if param_count > 0:
+                name = name if name else module.__class__.__name__
+                if param_count >= 1_000_000:
+                    param_str = f"{param_count/1_000_000:.1f}M"
+                elif param_count >= 1_000:
+                    param_str = f"{param_count/1_000:.1f}K" 
+                else:
+                    param_str = str(param_count)
+                
+                print(f"  {name:<20} {module.__class__.__name__:<15} {param_str:>8}")
+                
+            total_params += param_count
+            trainable_params += trainable_count
+    
+    print(f"  {'-'*45}")
+    
+    if total_params >= 1_000_000:
+        total_str = f"{total_params/1_000_000:.2f}M"
+    elif total_params >= 1_000:
+        total_str = f"{total_params/1_000:.1f}K"
+    else:
+        total_str = str(total_params)
+    
+    print(f"  {'total params':<36} {total_str:>8}")
+    if trainable_params != total_params:
+        print(f"  {'trainable params':<36} {trainable_params:>8}")
+
 def wrap(model, show_graph=False, auto_device=True):
     import torch
     import torch.fx
     
     if show_graph and _rank == 0:
-        print("=== Model Graph ===")
-        print(torch.fx.symbolic_trace(model).graph)
+        _print_model_summary(model)
     
     if auto_device and _device is not None:
         model = move_to_device(model, _device)
