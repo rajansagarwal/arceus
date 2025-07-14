@@ -125,11 +125,28 @@ def _pick_macos_iface() -> tuple[str, str]:
 
     try:
         ifconfig_out = subprocess.check_output(["ifconfig"]).decode()
-        # Capture interface + its first IPv4 "inet " address (not inet6)
-        pattern = re.compile(r"^(en\d+):.*?<UP,.*?>.*?(?:\n\s+.*)*?\n\s+inet (\d+\.\d+\.\d+\.\d+)", re.M | re.S)
+        
+        # More robust approach: find UP interfaces first, then find their IPs
         candidates = []
         
-        for iface, ip in pattern.findall(ifconfig_out):
+        # Find all UP interfaces
+        up_interfaces = re.findall(r"^(en\d+):.*?<UP,.*?>", ifconfig_out, re.M)
+        
+        for iface in up_interfaces:
+            # For each UP interface, find its IPv4 address
+            # Look for the interface block and extract the inet address
+            iface_pattern = re.compile(rf"^{re.escape(iface)}:.*?(?=^[a-zA-Z]|\Z)", re.M | re.S)
+            iface_block = iface_pattern.search(ifconfig_out)
+            
+            if not iface_block:
+                continue
+                
+            # Extract IPv4 address from this interface block
+            inet_match = re.search(r"\n\s+inet (\d+\.\d+\.\d+\.\d+)", iface_block.group(0))
+            if not inet_match:
+                continue
+                
+            ip = inet_match.group(1)
             try:
                 ip_addr = ipaddress.ip_address(ip)
                 
