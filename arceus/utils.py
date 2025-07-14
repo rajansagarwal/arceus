@@ -133,6 +133,10 @@ def _pick_macos_iface() -> str:
             any_up = any_up or iface  # remember first UP iface in case nothing else matches
             if ip_addr.is_private:
                 # Prefer RFC1918 private addresses (10.*, 192.168.*, 172.16-31.*)
+                # Ignore carrier–grade NAT 100.64.0.0/10 which is not routable P2P
+                if ip_addr >= ipaddress.ip_address("100.64.0.0") and ip_addr <= ipaddress.ip_address("100.127.255.255"):
+                    continue
+
                 private_candidate = private_candidate or iface
                 # If Wi-Fi en0 has private IP we take it immediately
                 if iface == "en0":
