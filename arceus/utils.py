@@ -112,41 +112,64 @@ def parse_cli_args():
 # Add a helper to dynamically pick the active network interface on macOS
 
 def _pick_macos_iface() -> str:
-    """Return the first UP, non-loopback network interface (e.g. en0, bridge100)."""
-    import subprocess, re, platform
+    """Return the best UP, non-loopback network interface that can actually be bound to."""
+    import subprocess, re, platform, socket
     if platform.system() != "Darwin":
         return "en0"  # sensible default on non-macOS (should not be called)
+    
     import ipaddress
 
     try:
         ifconfig_out = subprocess.check_output(["ifconfig"]).decode()
         # Capture interface + its first IPv4 "inet " address (not inet6)
         pattern = re.compile(r"^(en\d+):.*?<UP,.*?>.*?(?:\n\s+.*)*?\n\s+inet (\d+\.\d+\.\d+\.\d+)", re.M | re.S)
-        private_candidate = None
-        any_up = None
+        candidates = []
+        
         for iface, ip in pattern.findall(ifconfig_out):
-            # Skip known virtual / P2P interfaces that break Gloo
-            if iface.startswith("en4") or iface.startswith("en5"):
-                # often Sidecar/Continuity; keep as last resort
-                pass
-            ip_addr = ipaddress.ip_address(ip)
-            any_up = any_up or iface  # remember first UP iface in case nothing else matches
-            if ip_addr.is_private:
-                # Prefer RFC1918 private addresses (10.*, 192.168.*, 172.16-31.*)
-                # Ignore carrier–grade NAT 100.64.0.0/10 which is not routable P2P
+            try:
+                ip_addr = ipaddress.ip_address(ip)
+                
+                # Skip loopback
+                if ip_addr.is_loopback:
+                    continue
+                    
+                # Skip carrier-grade NAT 100.64.0.0/10 which is not routable P2P
                 if ip_addr >= ipaddress.ip_address("100.64.0.0") and ip_addr <= ipaddress.ip_address("100.127.255.255"):
                     continue
-
-                private_candidate = private_candidate or iface
-                # If Wi-Fi en0 has private IP we take it immediately
-                if iface == "en0":
-                    return iface
-        if private_candidate:
-            return private_candidate
-        if any_up:
-            return any_up
+                
+                # Test if we can actually bind to this interface
+                try:
+                    test_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    test_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                    test_sock.bind((ip, 0))  # bind to any free port
+                    test_sock.close()
+                    
+                    # If we got here, binding works
+                    priority = 0
+                    if iface == "en0":  # prefer en0 (usually Wi-Fi)
+                        priority = 100
+                    elif ip_addr.is_private:  # prefer private IPs
+                        priority = 50
+                    elif iface.startswith("en") and int(iface[2:]) < 4:  # prefer en0-en3
+                        priority = 25
+                    
+                    candidates.append((priority, iface, ip))
+                    
+                except OSError:
+                    # Can't bind to this interface, skip it
+                    continue
+                    
+            except (ValueError, OSError):
+                continue
+        
+        # Sort by priority (highest first) and return the best interface
+        if candidates:
+            candidates.sort(reverse=True)
+            return candidates[0][1]
+            
     except Exception:
         pass
+    
     return "en0"  # fallback
 
 def setup_macos_gloo_env():
@@ -174,7 +197,25 @@ def setup_macos_gloo_env():
         ip_result = subprocess.run(["ipconfig", "getifaddr", iface],
                                    capture_output=True, text=True, check=True)
         ipaddr = ip_result.stdout.strip()
-    except Exception:
+        
+        # Validate that we can actually bind to this address
+        try:
+            test_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            test_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            test_sock.bind((ipaddr, 0))
+            test_sock.close()
+        except OSError as e:
+            print(f"⚠️  Warning: Cannot bind to {iface} ({ipaddr}): {e}")
+            # Fall back to alternative method
+            try:
+                ipaddr = socket.gethostbyname_ex(socket.gethostname())[2][0]
+                print(f"   Falling back to hostname resolution: {ipaddr}")
+            except Exception:
+                ipaddr = "127.0.0.1"
+                print(f"   Falling back to loopback: {ipaddr}")
+        
+    except Exception as e:
+        print(f"⚠️  Warning: Could not get IP for {iface}: {e}")
         # Fallback: ask the OS for the default outbound IPv4
         try:
             ipaddr = socket.gethostbyname_ex(socket.gethostname())[2][0]
