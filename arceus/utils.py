@@ -116,10 +116,31 @@ def _pick_macos_iface() -> str:
     import subprocess, re, platform
     if platform.system() != "Darwin":
         return "en0"  # sensible default on non-macOS (should not be called)
+    import ipaddress
+
     try:
         ifconfig_out = subprocess.check_output(["ifconfig"]).decode()
-        for m in re.finditer(r"^(en\d+|bridge\d+): flags=.*<UP,", ifconfig_out, re.M):
-            return m.group(1)
+        # Capture interface + its first IPv4 "inet " address (not inet6)
+        pattern = re.compile(r"^(en\d+):.*?<UP,.*?>.*?(?:\n\s+.*)*?\n\s+inet (\d+\.\d+\.\d+\.\d+)", re.M | re.S)
+        private_candidate = None
+        any_up = None
+        for iface, ip in pattern.findall(ifconfig_out):
+            # Skip known virtual / P2P interfaces that break Gloo
+            if iface.startswith("en4") or iface.startswith("en5"):
+                # often Sidecar/Continuity; keep as last resort
+                pass
+            ip_addr = ipaddress.ip_address(ip)
+            any_up = any_up or iface  # remember first UP iface in case nothing else matches
+            if ip_addr.is_private:
+                # Prefer RFC1918 private addresses (10.*, 192.168.*, 172.16-31.*)
+                private_candidate = private_candidate or iface
+                # If Wi-Fi en0 has private IP we take it immediately
+                if iface == "en0":
+                    return iface
+        if private_candidate:
+            return private_candidate
+        if any_up:
+            return any_up
     except Exception:
         pass
     return "en0"  # fallback
