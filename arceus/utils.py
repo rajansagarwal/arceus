@@ -111,11 +111,15 @@ def parse_cli_args():
 
 # Add a helper to dynamically pick the active network interface on macOS
 
-def _pick_macos_iface() -> str:
-    """Return the best UP, non-loopback network interface that can actually be bound to."""
+def _pick_macos_iface() -> tuple[str, str]:
+    """Return the best UP, non-loopback network interface that can actually be bound to.
+    
+    Returns:
+        tuple[str, str]: (interface_name, ip_address)
+    """
     import subprocess, re, platform, socket
     if platform.system() != "Darwin":
-        return "en0"  # sensible default on non-macOS (should not be called)
+        return "en0", "127.0.0.1"  # sensible default on non-macOS (should not be called)
     
     import ipaddress
 
@@ -165,12 +169,18 @@ def _pick_macos_iface() -> str:
         # Sort by priority (highest first) and return the best interface
         if candidates:
             candidates.sort(reverse=True)
-            return candidates[0][1]
+            return candidates[0][1], candidates[0][2]
             
     except Exception:
         pass
     
-    return "en0"  # fallback
+    # Fallback: try to get en0 IP
+    try:
+        ip_result = subprocess.run(["ipconfig", "getifaddr", "en0"],
+                                   capture_output=True, text=True, check=True)
+        return "en0", ip_result.stdout.strip()
+    except Exception:
+        return "en0", "127.0.0.1"
 
 def setup_macos_gloo_env():
     """Configure environment so that torch.distributed Gloo works reliably on macOS.
@@ -189,38 +199,21 @@ def setup_macos_gloo_env():
         # Nothing to do on non-macOS hosts
         return None
 
-    # Step 1 – pick interface
-    iface = os.getenv("GLOO_SOCKET_IFNAME") or _pick_macos_iface()
-
-    # Step 2 – resolve IPv4 for that interface
-    try:
-        ip_result = subprocess.run(["ipconfig", "getifaddr", iface],
-                                   capture_output=True, text=True, check=True)
-        ipaddr = ip_result.stdout.strip()
-        
-        # Validate that we can actually bind to this address
+    # Step 1 & 2 – pick interface and get its IP
+    if os.getenv("GLOO_SOCKET_IFNAME"):
+        # User specified interface, get its IP
+        iface = os.getenv("GLOO_SOCKET_IFNAME")
         try:
-            test_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            test_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            test_sock.bind((ipaddr, 0))
-            test_sock.close()
-        except OSError as e:
-            print(f"⚠️  Warning: Cannot bind to {iface} ({ipaddr}): {e}")
-            # Fall back to alternative method
-            try:
-                ipaddr = socket.gethostbyname_ex(socket.gethostname())[2][0]
-                print(f"   Falling back to hostname resolution: {ipaddr}")
-            except Exception:
-                ipaddr = "127.0.0.1"
-                print(f"   Falling back to loopback: {ipaddr}")
-        
-    except Exception as e:
-        print(f"⚠️  Warning: Could not get IP for {iface}: {e}")
-        # Fallback: ask the OS for the default outbound IPv4
-        try:
-            ipaddr = socket.gethostbyname_ex(socket.gethostname())[2][0]
-        except Exception:
-            ipaddr = "127.0.0.1"
+            ip_result = subprocess.run(["ipconfig", "getifaddr", iface],
+                                       capture_output=True, text=True, check=True)
+            ipaddr = ip_result.stdout.strip()
+        except Exception as e:
+            print(f"⚠️  Warning: Could not get IP for user-specified interface {iface}: {e}")
+            # Fallback to automatic selection
+            iface, ipaddr = _pick_macos_iface()
+    else:
+        # Automatic selection - this already validates binding
+        iface, ipaddr = _pick_macos_iface()
 
     # Step 3 – set / keep the golden env block
     os.environ.setdefault("GLOO_SOCKET_IFNAME", iface)
