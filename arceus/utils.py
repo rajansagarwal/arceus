@@ -155,7 +155,9 @@ def _pick_macos_iface() -> tuple[str, str]:
                     continue
                     
                 # Skip carrier-grade NAT 100.64.0.0/10 which is not routable P2P
-                if ip_addr >= ipaddress.ip_address("100.64.0.0") and ip_addr <= ipaddress.ip_address("100.127.255.255"):
+                cgn_start = ipaddress.IPv4Address("100.64.0.0")
+                cgn_end = ipaddress.IPv4Address("100.127.255.255")
+                if isinstance(ip_addr, ipaddress.IPv4Address) and cgn_start <= ip_addr <= cgn_end:
                     continue
                 
                 # Test if we can actually bind to this interface
@@ -220,24 +222,37 @@ def setup_macos_gloo_env():
     if os.getenv("GLOO_SOCKET_IFNAME"):
         # User specified interface, get its IP
         iface = os.getenv("GLOO_SOCKET_IFNAME")
-        try:
-            ip_result = subprocess.run(["ipconfig", "getifaddr", iface],
-                                       capture_output=True, text=True, check=True)
-            ipaddr = ip_result.stdout.strip()
-        except Exception as e:
-            print(f"⚠️  Warning: Could not get IP for user-specified interface {iface}: {e}")
-            # Fallback to automatic selection
+        if not iface:
+            print("⚠️  Warning: GLOO_SOCKET_IFNAME is not set")
             iface, ipaddr = _pick_macos_iface()
+        else:
+            try:
+                ip_result = subprocess.run(["ipconfig", "getifaddr", iface],
+                                           capture_output=True, text=True, check=True)
+                ipaddr = ip_result.stdout.strip()
+            except Exception as e:
+                print(f"⚠️  Warning: Could not get IP for user-specified interface {iface}: {e}")
+                # Fallback to automatic selection
+                iface, ipaddr = _pick_macos_iface()
     else:
         # Automatic selection - this already validates binding
         iface, ipaddr = _pick_macos_iface()
 
     # Step 3 – set / keep the golden env block
+    # Ensure we have valid values before setting environment variables
+    if not iface or not ipaddr:
+        print("⚠️  Warning: Could not determine valid interface/IP, using fallback")
+        iface = "en0"
+        ipaddr = "127.0.0.1"
+    
     os.environ.setdefault("GLOO_SOCKET_IFNAME", iface)
     os.environ.setdefault("GLOO_SOCKET_IFADDR", ipaddr)
-    os.environ.setdefault("GLOO_SOCKET_FAMILY", "AF_INET")
-    os.environ.setdefault("GLOO_SOCKET_DISABLE_IPV6", "1")
-    os.environ.setdefault("GLOO_ALLOW_UNSECURED", "1")
+    os.environ["GLOO_SOCKET_FAMILY"] = "AF_INET"
+    os.environ["GLOO_SOCKET_DISABLE_IPV6"] = "1" 
+    os.environ["GLOO_ALLOW_UNSECURED"] = "1"
+    
+    # Additional IPv6 disabling for cross-device reliability
+    os.environ["GLOO_SOCKET_FORCE_IPV4"] = "1"
 
     # Step 4 – small socket pool = lower overhead on Wi-Fi
     os.environ.setdefault("GLOO_SOCKET_NTHREADS", "1")
@@ -347,12 +362,15 @@ def init_pytorch_distributed(world, rank):
             if "timeout" in error_str:
                 print(f"✗ attempt {attempt + 1} timed out after {timeout_secs}s")
                 if attempt == 2:  # Last attempt
-                    print("Common fixes:")
-                    print("1. Ensure both devices are on the same WiFi network")
+                    print("Common fixes for cross-device communication:")
+                    print("1. Ensure both devices are on the same WiFi network and subnet")
                     print("2. Check router settings - disable 'client isolation' or 'AP isolation'")  
                     print("3. Allow Python in macOS Firewall: System Settings → Network → Firewall")
-                    print("4. Try different port: python train.py --host --port 8080")
-                    print("5. For debugging: export ARCEUS_DEBUG=1")
+                    print("4. Disable macOS firewall stealth mode: sudo pfctl -d")
+                    print("5. Try different port: python train.py --host --port 8080")
+                    print("6. For debugging: export ARCEUS_DEBUG=1")
+                    print("7. Check network interface: export GLOO_SOCKET_IFNAME=en0")
+                    print("8. Verify IPv4 connectivity: ping <other_device_ip>")
                     raise RuntimeError("distributed training initialization timed out - check network connectivity")
                 continue
             elif "unsupported gloo device" in error_str or "makedeviceforinterface" in error_str:
@@ -368,10 +386,22 @@ def init_pytorch_distributed(world, rank):
                 print("This indicates the macOS stealth mode is still blocking connections")
                 print("Try: sudo pfctl -d (temporarily disable firewall)")
                 raise
-            elif "fe80::" in error_str:
+            elif "fe80::" in error_str or "ipv6" in error_str:
                 print(f"✗ IPv6 link-local address detected - IPv6 not properly disabled")
-                print("This should not happen with current configuration")
-                raise
+                print("This indicates Gloo is still trying to use IPv6 despite configuration")
+                print("Cross-device training requires IPv4 only. Trying to force IPv4...")
+                
+                os.environ["GLOO_SOCKET_FAMILY"] = "AF_INET"
+                os.environ["GLOO_SOCKET_DISABLE_IPV6"] = "1"
+                os.environ["GLOO_SOCKET_FORCE_IPV4"] = "1"
+                os.environ["GLOO_SOCKET_PREFER_IPV4"] = "1"
+                
+                if attempt < 2:  # Try once more with stronger IPv6 disabling
+                    print("Retrying with stronger IPv6 disabling...")
+                    continue
+                else:
+                    print("Failed to disable IPv6 after multiple attempts")
+                    raise
             elif "eaddrinuse" in error_str:
                 print(f"  port {master_port} busy, trying another...")
                 master_port = find_free_port()
@@ -381,4 +411,4 @@ def init_pytorch_distributed(world, rank):
                 print("For debugging, set ARCEUS_DEBUG=1 and check Gloo environment variables")
                 raise
     
-    raise RuntimeError("couldn't initialize distributed training after 3 attempts") 
+    raise RuntimeError("couldn't initialize distributed training after 3 attempts")    
