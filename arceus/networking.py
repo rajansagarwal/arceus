@@ -1,5 +1,6 @@
 import contextlib
 import json
+import os
 import socket
 import time
 from threading import Thread
@@ -19,10 +20,47 @@ def get_local_ip():
         sock.close()
 
 def get_broadcast_ip():
-    # just replace last octet with 255
-    parts = get_local_ip().split(".")
-    parts[3] = "255"  
-    return ".".join(parts)
+    """Get broadcast IP addresses for all available network interfaces.
+    
+    For cross-device communication, we need to broadcast on all possible
+    network segments, not just assume a /24 subnet.
+    """
+    import netifaces
+    import ipaddress
+    
+    broadcast_ips = []
+    
+    try:
+        for interface in netifaces.interfaces():
+            try:
+                addrs = netifaces.ifaddresses(interface)
+                if netifaces.AF_INET in addrs:
+                    for addr_info in addrs[netifaces.AF_INET]:
+                        if 'broadcast' in addr_info and 'addr' in addr_info:
+                            broadcast_ip = addr_info['broadcast']
+                            local_ip = addr_info['addr']
+                            
+                            try:
+                                ip_obj = ipaddress.IPv4Address(local_ip)
+                                if not ip_obj.is_loopback and not ip_obj.is_link_local:
+                                    broadcast_ips.append(broadcast_ip)
+                            except ValueError:
+                                continue
+            except (KeyError, ValueError):
+                continue
+                
+    except ImportError:
+        pass
+    
+    if not broadcast_ips:
+        try:
+            parts = get_local_ip().split(".")
+            parts[3] = "255"  
+            broadcast_ips.append(".".join(parts))
+        except:
+            broadcast_ips.append("255.255.255.255")
+    
+    return broadcast_ips[0]
 
 def find_free_port():
     # let OS pick a free port
@@ -45,6 +83,7 @@ class UDPBeacon:
         if hasattr(socket, "SO_REUSEPORT"):  # not all systems have this
             self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.sock.bind(("", DISCOVERY_PORT))
         
         # start threads for tx/rx
@@ -60,14 +99,60 @@ class UDPBeacon:
             "port": self.tcp_port
         }
         packet = json.dumps(msg).encode()
-        dest = (get_broadcast_ip(), DISCOVERY_PORT)
+        
+        broadcast_ips = self._get_all_broadcast_ips()
         
         while self.running:
             try:
-                self.sock.sendto(packet, dest)
+                for broadcast_ip in broadcast_ips:
+                    try:
+                        dest = (broadcast_ip, DISCOVERY_PORT)
+                        self.sock.sendto(packet, dest)
+                    except OSError as e:
+                        if os.getenv("ARCEUS_DEBUG"):
+                            print(f"Failed to broadcast to {broadcast_ip}: {e}")
                 time.sleep(BROADCAST_INTERVAL)
             except OSError:
                 break  # socket probably closed
+    
+    def _get_all_broadcast_ips(self):
+        """Get all broadcast IP addresses for cross-device discovery."""
+        import netifaces
+        import ipaddress
+        
+        broadcast_ips = []
+        
+        try:
+            for interface in netifaces.interfaces():
+                try:
+                    addrs = netifaces.ifaddresses(interface)
+                    if netifaces.AF_INET in addrs:
+                        for addr_info in addrs[netifaces.AF_INET]:
+                            if 'broadcast' in addr_info and 'addr' in addr_info:
+                                broadcast_ip = addr_info['broadcast']
+                                local_ip = addr_info['addr']
+                                
+                                try:
+                                    ip_obj = ipaddress.IPv4Address(local_ip)
+                                    if not ip_obj.is_loopback and not ip_obj.is_link_local:
+                                        broadcast_ips.append(broadcast_ip)
+                                except ValueError:
+                                    continue
+                except (KeyError, ValueError):
+                    continue
+                    
+        except ImportError:
+            pass
+        
+        if not broadcast_ips:
+            try:
+                parts = get_local_ip().split(".")
+                parts[3] = "255"  
+                broadcast_ips.append(".".join(parts))
+            except:
+                broadcast_ips.append("255.255.255.255")
+        
+        return broadcast_ips
     
     def _listen_loop(self):
         # listen for broadcasts from other sessions
@@ -101,4 +186,4 @@ class UDPBeacon:
     
     def stop(self):
         self.running = False
-        self.sock.close() 
+        self.sock.close()        
