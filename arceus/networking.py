@@ -10,24 +10,20 @@ MAGIC_HEADER = "FFTRAIN_DISC"
 BROADCAST_INTERVAL = 3.0  # seconds between broadcasts
 
 def get_local_ip():
-    # use google DNS to figure out our local IP
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    # get the local IPv6 address
+    sock = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
     try:
-        sock.connect(("8.8.8.8", 80))
+        sock.connect(("2001:4860:4860::8888", 80))  # Google's public DNS IPv6
         return sock.getsockname()[0]
     finally:
         sock.close()
 
-def get_broadcast_ip():
-    # just replace last octet with 255
-    parts = get_local_ip().split(".")
-    parts[3] = "255"  
-    return ".".join(parts)
+# Broadcast logic does not have a direct IPv6 equivalent
 
 def find_free_port():
     # let OS pick a free port
-    with contextlib.closing(socket.socket()) as s:
-        s.bind(("", 0))
+    with contextlib.closing(socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)) as s:
+        s.bind(("::", 0))
         return s.getsockname()[1]
 
 class UDPBeacon:
@@ -40,12 +36,12 @@ class UDPBeacon:
         self.peers = {}  # session_id -> (ip, port, timestamp)
         
         # set up UDP socket for broadcasting
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.sock = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         if hasattr(socket, "SO_REUSEPORT"):  # not all systems have this
             self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
-        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-        self.sock.bind(("", DISCOVERY_PORT))
+        # Broadcasting in IPv6 is different; often multicast is used instead
+        self.sock.bind(("::", DISCOVERY_PORT))
         
         # start threads for tx/rx
         Thread(target=self._broadcast_loop, daemon=True).start()
@@ -60,7 +56,7 @@ class UDPBeacon:
             "port": self.tcp_port
         }
         packet = json.dumps(msg).encode()
-        dest = (get_broadcast_ip(), DISCOVERY_PORT)
+        dest = ("ff02::1", DISCOVERY_PORT)  # Multicast address for all nodes
         
         while self.running:
             try:
@@ -101,4 +97,4 @@ class UDPBeacon:
     
     def stop(self):
         self.running = False
-        self.sock.close() 
+        self.sock.close()
