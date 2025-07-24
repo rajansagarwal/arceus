@@ -73,19 +73,6 @@ python train.py --host
 python train.py --join <session_id>
 ```
 
-## macOS Distributed Training
-Arceus configures Gloo for macOS to avoid common issues. For manual setup:
-
-```python
-import arceus
-
-# Set up macOS-safe environment
-arceus.setup_macos_env()
-
-# Validate Gloo setup
-arceus.validate_gloo()
-```
-
 ### Troubleshooting
 - Ensure devices are on the same network.
 - Disable "client isolation" on routers.
@@ -100,3 +87,16 @@ For issues, please contact [support@example.com](mailto:support@example.com).
 
 ## License
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+## macOS Distributed Training
+Arceus configures Gloo for macOS to avoid common issues. For manual setup:
+
+```python
+import arceus
+
+# Set up macOS-safe environment
+arceus.setup_macos_env()
+
+# Validate Gloo setup
+arceus.validate_gloo()
+```
