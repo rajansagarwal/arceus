@@ -1,98 +1,102 @@
-# arceus v0.5
+# Arceus v0.5
 
-distributed training across multiple devices for pytorch ml models
+## Introduction
+Arceus is a distributed training library for PyTorch that enables efficient training of machine learning models across multiple devices. It automates device selection and simplifies the setup of distributed training environments.
 
-supports data parallel training with automatic device detection (CUDA GPU > Apple Silicon MPS > CPU). currently fixing model parallelism, not production ready yet. here's how it works:
+## Features
+- Automatic device detection (CUDA GPU > Apple Silicon MPS > CPU)
+- Data parallel training
+- Seamless integration with PyTorch
+- Enhanced progress tracking with automatic metrics
 
+## Installation
+
+### Prerequisites
+- Python 3.x
+- PyTorch compatible with your environment
+
+### Install
+Using pip:
+```bash
+pip install -r requirements.txt
+```
+
+Using uv:
+```bash
+uv sync
+```
+
+## Usage
+
+### Basic Example
 ```python
 import torch
 import torch.nn as nn
 import torch.optim as optim
 import arceus
 
-# initialize arceus (automatically detects best device)
+# Initialize Arceus (automatically detects best device)
 rank, world_size, args = arceus.init()
 
 class NeuralNetwork(nn.Module):
-    # your network architecture
+    # Define your network architecture here
     pass
 
 model = NeuralNetwork()
-model = arceus.wrap(model)  # automatically moves to best device + distributed training
+model = arceus.wrap(model)  # Move to best device + setup for distributed training
 
+# Training setup
 optimizer = optim.Adam(model.parameters())
 criterion = nn.CrossEntropyLoss()
 
-# Enhanced progress bar with automatic metrics
+# Training loop
 for epoch in range(epochs):
     progress_bar = arceus.progress(dataloader, optimizer)
-    
     for data, target in progress_bar:
         data, target = arceus.to_device(data), arceus.to_device(target)
-        
-        # ... training step ...
         loss = criterion(model(data), target)
         loss.backward()
         optimizer.step()
-        
-        # metrics captured automatically! (host sees aggregated, joiners see individual)
-        progress_bar.step(loss=loss)  # pass any metrics: loss=x, accuracy=y, etc.
-            
-...
-arceus.finish()  # clean up distributed training
+        progress_bar.step(loss=loss)
+
+arceus.finish()  # Clean up
 ```
 
-device selection is automatic - arceus chooses the best available device and configures the appropriate distributed backend.
-
-## Usage
-
-### installation
-
+### Command-Line Usage
+#### Host a Session
 ```bash
-# if using uv 
-uv sync
-# if using pip
-pip install -r requirements.txt
-```
-
-### host
-
-```
 python train.py --host
 ```
 
-### join
-
-```
+#### Join a Session
+```bash
 python train.py --join <session_id>
 ```
 
-## macOS distributed training
-
-arceus automatically configures Gloo for macOS to avoid common firewall/IPv6 issues. for manual setup:
+## macOS Distributed Training
+Arceus configures Gloo for macOS to avoid common issues. For manual setup:
 
 ```python
 import arceus
 
-# set up macOS-safe environment (optional - done automatically)
+# Set up macOS-safe environment
 arceus.setup_macos_env()
 
-# validate Gloo setup (optional - for debugging)
+# Validate Gloo setup
 arceus.validate_gloo()
 ```
 
-### troubleshooting
+### Troubleshooting
+- Ensure devices are on the same network.
+- Disable "client isolation" on routers.
+- Allow Python in macOS Firewall settings.
+- Try different ports if necessary.
 
-if you get `Connection reset by peer` or `state_ != CONNECTING` errors:
+## Contributing
+We welcome contributions! Please read our [contributing guide](CONTRIBUTING.md) for more details.
 
-1. ensure both devices are on the same WiFi network
-2. check router settings - disable "client isolation" or "AP isolation"  
-3. allow Python in macOS Firewall: System Settings → Network → Firewall
-4. try different port: `python train.py --host --port 8080`
+## Support
+For issues, please contact [support@example.com](mailto:support@example.com).
 
-the library automatically sets these environment variables for macOS:
-- `GLOO_SOCKET_FAMILY=AF_INET` (IPv4 only)
-- `GLOO_SOCKET_DISABLE_IPV6=1` (block fe80::* picks)
-- `GLOO_SOCKET_IFNAME=en0` (bind to Wi-Fi)
-- `GLOO_SOCKET_IFADDR=<wifi_ip>` (pin to actual IP)
-- `GLOO_ALLOW_UNSECURED=1` (skip stealth-mode RST)
+## License
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
