@@ -10,7 +10,7 @@ MAGIC_HEADER = "FFTRAIN_DISC"
 BROADCAST_INTERVAL = 3.0  # seconds between broadcasts
 
 def get_local_ip():
-    # use google DNS to figure out our local IP
+    # use google DNS to figure out our local IPv4 address
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         sock.connect(("8.8.8.8", 80))
@@ -18,8 +18,17 @@ def get_local_ip():
     finally:
         sock.close()
 
+def get_local_ipv6():
+    # use a public DNS IPv6 address to determine our local IPv6 address
+    sock = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
+    try:
+        sock.connect(("2001:4860:4860::8888", 80))
+        return sock.getsockname()[0]
+    finally:
+        sock.close()
+
 def get_broadcast_ip():
-    # just replace last octet with 255
+    # just replace last octet with 255 for IPv4
     parts = get_local_ip().split(".")
     parts[3] = "255"  
     return ".".join(parts)
@@ -39,13 +48,20 @@ class UDPBeacon:
         self.running = True
         self.peers = {}  # session_id -> (ip, port, timestamp)
         
-        # set up UDP socket for broadcasting
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        # set up UDP socket for broadcasting on IPv4
+        self.sock_v4 = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.sock_v4.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         if hasattr(socket, "SO_REUSEPORT"):  # not all systems have this
-            self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
-        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-        self.sock.bind(("", DISCOVERY_PORT))
+            self.sock_v4.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+        self.sock_v4.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        self.sock_v4.bind(("", DISCOVERY_PORT))
+
+        # set up UDP socket for broadcasting on IPv6
+        self.sock_v6 = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
+        self.sock_v6.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        if hasattr(socket, "SO_REUSEPORT"):  # not all systems have this
+            self.sock_v6.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+        self.sock_v6.bind(("", DISCOVERY_PORT))
         
         # start threads for tx/rx
         Thread(target=self._broadcast_loop, daemon=True).start()
@@ -53,18 +69,27 @@ class UDPBeacon:
     
     def _broadcast_loop(self):
         # keep broadcasting our session info
-        msg = {
+        msg_v4 = {
             "magic": MAGIC_HEADER,
             "session_id": self.session_id,
             "ip": get_local_ip(),
             "port": self.tcp_port
         }
-        packet = json.dumps(msg).encode()
-        dest = (get_broadcast_ip(), DISCOVERY_PORT)
+        msg_v6 = {
+            "magic": MAGIC_HEADER,
+            "session_id": self.session_id,
+            "ip": get_local_ipv6(),
+            "port": self.tcp_port
+        }
+        packet_v4 = json.dumps(msg_v4).encode()
+        packet_v6 = json.dumps(msg_v6).encode()
+        dest_v4 = (get_broadcast_ip(), DISCOVERY_PORT)
+        dest_v6 = ("ff02::1", DISCOVERY_PORT)  # link-local all-nodes multicast address for IPv6
         
         while self.running:
             try:
-                self.sock.sendto(packet, dest)
+                self.sock_v4.sendto(packet_v4, dest_v4)
+                self.sock_v6.sendto(packet_v6, dest_v6)
                 time.sleep(BROADCAST_INTERVAL)
             except OSError:
                 break  # socket probably closed
@@ -73,17 +98,24 @@ class UDPBeacon:
         # listen for broadcasts from other sessions
         while self.running:
             try:
-                data, addr = self.sock.recvfrom(1024)
-                info = json.loads(data.decode())
-                
-                if info.get("magic") != MAGIC_HEADER:
-                    continue  # not one of ours
+                data_v4, addr_v4 = self.sock_v4.recvfrom(1024)
+                info_v4 = json.loads(data_v4.decode())
+                if info_v4.get("magic") == MAGIC_HEADER:
+                    self.peers[info_v4["session_id"]] = (
+                        info_v4["ip"], 
+                        info_v4["port"], 
+                        time.time()
+                    )
+
+                data_v6, addr_v6 = self.sock_v6.recvfrom(1024)
+                info_v6 = json.loads(data_v6.decode())
+                if info_v6.get("magic") == MAGIC_HEADER:
+                    self.peers[info_v6["session_id"]] = (
+                        info_v6["ip"], 
+                        info_v6["port"], 
+                        time.time()
+                    )
                     
-                self.peers[info["session_id"]] = (
-                    info["ip"], 
-                    info["port"], 
-                    time.time()
-                )
             except OSError:
                 break
     
@@ -93,7 +125,7 @@ class UDPBeacon:
         active = {}
         
         for session_id, (ip, port, ts) in self.peers.items():
-            # skip our own discovery beacon and expired ones
+            # ensure we only return sessions that are recent and valid
             if session_id != "DISC" and port > 0 and (now - ts) < 10:
                 active[session_id] = (ip, port)
         
@@ -101,4 +133,5 @@ class UDPBeacon:
     
     def stop(self):
         self.running = False
-        self.sock.close() 
+        self.sock_v4.close()
+        self.sock_v6.close()
