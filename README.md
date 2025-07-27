@@ -90,7 +90,14 @@ if you get `Connection reset by peer` or `state_ != CONNECTING` errors:
 3. allow Python in macOS Firewall: System Settings → Network → Firewall
 4. try different port: `python train.py --host --port 8080`
 
-the library automatically sets these environment variables for macOS:
+### IPv4 Implementation Enhancements
+
+- Improved local IP discovery with fallback methods for increased reliability.
+- Enhanced broadcast IP calculation for better subnet compatibility.
+- Added robust error handling and logging for UDP beacon operations.
+- Implemented connection retry logic for distributed training to handle network interruptions.
+
+The library automatically sets these environment variables for macOS:
 - `GLOO_SOCKET_FAMILY=AF_INET` (IPv4 only)
 - `GLOO_SOCKET_DISABLE_IPV6=1` (block fe80::* picks)
 - `GLOO_SOCKET_IFNAME=en0` (bind to Wi-Fi)
