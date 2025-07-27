@@ -44,7 +44,7 @@ class TrainingHost:
                 client_ip = parts[1] if len(parts) > 1 else addr[0]
                 
                 self.clients[client_id] = (client_sock, client_ip)
-                print(f"✅ Peer joined: {client_id[:8]}...")
+                print(f"[32m[1m✔️ Peer joined: {client_id[:8]}...\033[0m")
                 
             except OSError:
                 break  # probably shutting down
@@ -110,4 +110,18 @@ class TrainingJoiner:
         if all(peer_id != self.my_id for peer_id, _ in world):
             world.append((self.my_id, (self.host_ip, world[0][1][1])))
         
-        return world  # don't sort! host already sent it in the right order 
+        return world  # don't sort! host already sent it in the right order
+
+    def retry_connection(self, retries=3, delay=2):
+        # Retry logic for connecting to host
+        attempt = 0
+        while attempt < retries:
+            try:
+                self.connect_to_host()
+                print(f"Connected to host on attempt {attempt + 1}")
+                return True
+            except socket.error as e:
+                print(f"Connection attempt {attempt + 1} failed: {e}")
+                attempt += 1
+                time.sleep(delay)
+        return False
