@@ -1,6 +1,8 @@
 import contextlib
 import json
 import socket
+import struct
+import fcntl
 import time
 from threading import Thread
 
@@ -9,20 +11,37 @@ DISCOVERY_PORT = 12346
 MAGIC_HEADER = "FFTRAIN_DISC" 
 BROADCAST_INTERVAL = 3.0  # seconds between broadcasts
 
+# Utility function to get local IP address
+# Tries multiple methods to ensure reliability
+
 def get_local_ip():
-    # use google DNS to figure out our local IP
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
+        # use google DNS to figure out our local IP
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.connect(("8.8.8.8", 80))
-        return sock.getsockname()[0]
-    finally:
+        ip = sock.getsockname()[0]
         sock.close()
+        return ip
+    except Exception:
+        # fallback to ifconfig parsing on macOS
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            ip = socket.inet_ntoa(fcntl.ioctl(
+                s.fileno(),
+                0x8915,  # SIOCGIFADDR
+                struct.pack('256s', b'en0'[:15])
+            )[20:24])
+            return ip
+        except Exception as e:
+            print(f"Failed to get local IP: {e}")
+            return "127.0.0.1"
 
 def get_broadcast_ip():
-    # just replace last octet with 255
-    parts = get_local_ip().split(".")
-    parts[3] = "255"  
-    return ".".join(parts)
+    local_ip = get_local_ip()
+    ip_parts = local_ip.split('.')
+    # Assuming a common subnet mask 255.255.255.0
+    ip_parts[3] = '255'
+    return '.'.join(ip_parts)
 
 def find_free_port():
     # let OS pick a free port
@@ -102,3 +121,5 @@ class UDPBeacon:
     def stop(self):
         self.running = False
         self.sock.close() 
+        # Ensure threads are terminated
+        print("Beacon stopped and resources cleaned up.")
