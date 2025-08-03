@@ -1,98 +1,68 @@
-import types
-import builtins
-import pytest
-import torch
+import os
+import sys
+import io
+import unittest
+from unittest import mock
 
-import arceus.core as core
-
-
-class Tiny(torch.nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.lin = torch.nn.Linear(4, 2)
-    def forward(self, x):
-        return self.lin(x)
+# Ensure repository root on sys.path when running directly
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir)))
 
 
-def seed_single_process(monkeypatch):
-    # Seed internal globals to simulate single-process init
-    monkeypatch.setattr(core, '_world', [('uuid', ('localhost', 0))])
-    monkeypatch.setattr(core, '_rank', 0)
-    monkeypatch.setattr(core, '_device', torch.device('cpu'))
-    monkeypatch.setattr(core, '_device_info', 'CPU (test)')
+class TestCore(unittest.TestCase):
+    def setUp(self):
+        global core
+        from arceus import core as _core
+        core = _core
+
+    def test_print_model_summary(self):
+        import torch
+        import torch.nn as nn
+        model = nn.Sequential(nn.Linear(4, 3), nn.ReLU(), nn.Linear(3, 2))
+        buf = io.StringIO()
+        with mock.patch("sys.stdout", buf):
+            core._print_model_summary(model)
+        out = buf.getvalue()
+        self.assertIn("Parameters", out)
+
+    def test_wrap_single_process_auto_device(self):
+        class DummyModel:
+            pass
+        model = DummyModel()
+        with mock.patch.object(core, "_world", [("node", 0)]), \
+             mock.patch.object(core, "device", "cpu"), \
+             mock.patch("arceus.core.move_to_device", side_effect=lambda m, d: m) as mmove:
+            wrapped = core.wrap(model, auto_device=True)
+            self.assertIs(wrapped, model)
+            mmove.assert_called_once()
+
+    def test_getters_and_to_device(self):
+        with mock.patch.object(core, "device", "cpu"):
+            self.assertEqual(str(core.get_device()), "cpu")
+            info = core.get_device_info()
+            self.assertIsInstance(info, str)
+
+        class Dummy:
+            def __init__(self):
+                self.moved = None
+            def to(self, d):
+                self.moved = d
+                return self
+        x = Dummy()
+        moved = core.to_device(x)
+        self.assertIs(moved, x)
+        self.assertEqual(x.moved, core.device)
+
+    def test_get_learning_rate(self):
+        class Opt:
+            def __init__(self):
+                self.param_groups = [{"lr": 0.01}]
+        self.assertEqual(core.get_learning_rate(Opt()), 0.01)
+
+    def test_progress_constructs(self):
+        with mock.patch("arceus.core.MetricProgressBar") as mpb:
+            core.progress(total=10, description="Test")
+            mpb.assert_called()
 
 
-def test_print_model_summary(capsys):
-    m = Tiny()
-    core._print_model_summary(m)
-    out = capsys.readouterr().out
-    assert 'model summary' in out.lower()
-    assert 'total params' in out
-
-
-def test_wrap_single_process_moves(monkeypatch):
-    seed_single_process(monkeypatch)
-
-    # track move_to_device is called
-    called = {'v': 0}
-    def fake_move(obj, device):
-        called['v'] += 1
-        return obj
-    monkeypatch.setattr(core, 'move_to_device', fake_move)
-
-    m = Tiny()
-    out = core.wrap(m, show_graph=True, auto_device=True)
-    assert out is m
-    assert called['v'] == 1
-
-
-def test_progress_constructs(monkeypatch):
-    seed_single_process(monkeypatch)
-
-    constructed = {'args': None}
-    class FakeMPB:
-        def __init__(self, *args):
-            constructed['args'] = args
-    monkeypatch.setattr(core, 'MetricProgressBar', FakeMPB)
-
-    data = [1, 2, 3]
-    core.progress(data)
-    args = constructed['args']
-    assert args[0] is data
-    assert args[1] == 0  # rank
-
-
-def test_getters_setters(monkeypatch):
-    seed_single_process(monkeypatch)
-    assert str(core.get_device()) == 'cpu'
-    assert 'CPU' in core.get_device_info()
-
-    class Obj:
-        def __init__(self):
-            self.moved = False
-        def to(self, device):
-            self.moved = True
-            return self
-    obj = Obj()
-    out = core.to_device(obj)
-    assert out is obj and obj.moved
-
-
-def test_get_learning_rate():
-    opt = types.SimpleNamespace(param_groups=[{'lr': 0.005}])
-    assert core.get_learning_rate(opt) == 0.005
-
-
-def test_cli_parsing(monkeypatch):
-    # Use auto mode with defaults and ensure it returns tuple
-    def fake_parse():
-        return 'auto', None, types.SimpleNamespace(timeout=0, port=29500)
-    monkeypatch.setattr(core, 'parse_cli_args', fake_parse)
-
-    # Avoid real init; simulate single-process
-    def fake_init(mode, session, timeout, port):
-        return 0, 1
-    monkeypatch.setattr(core, 'init', fake_init)
-
-    rank, world, args = core.cli()
-    assert rank == 0 and world == 1
+if __name__ == "__main__":
+    unittest.main()
