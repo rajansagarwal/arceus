@@ -114,6 +114,8 @@ def parse_cli_args():
 def _pick_macos_iface() -> tuple[str, str]:
     """Return the best UP, non-loopback network interface that can actually be bound to.
     
+    Prioritizes interfaces with IPv4 addresses that are suitable for peer-to-peer communication.
+    
     Returns:
         tuple[str, str]: (interface_name, ip_address)
     """
@@ -129,10 +131,21 @@ def _pick_macos_iface() -> tuple[str, str]:
         # More robust approach: find UP interfaces first, then find their IPs
         candidates = []
         
-        # Find all UP interfaces
-        up_interfaces = re.findall(r"^(en\d+):.*?<UP,.*?>", ifconfig_out, re.M)
+        # Find all UP interfaces - prioritize en0 (Wi-Fi) and other en* interfaces
+        # Also look for other potential interfaces like bridge* (used for USB tethering)
+        up_interfaces = re.findall(r"^([a-zA-Z0-9]+):.*?<UP,.*?>", ifconfig_out, re.M)
         
+        # Filter for common network interfaces, prioritizing the ones typically used for networking
+        prioritized_interfaces = []
         for iface in up_interfaces:
+            if iface.startswith("en"):  # Standard macOS network interfaces
+                prioritized_interfaces.append(iface)
+        # Add any remaining interfaces after the en* ones
+        for iface in up_interfaces:
+            if not iface.startswith("en") and not iface.startswith("lo"):  # Skip loopback
+                prioritized_interfaces.append(iface)
+        
+        for iface in prioritized_interfaces:
             # For each UP interface, find its IPv4 address
             # Look for the interface block and extract the inet address
             iface_pattern = re.compile(rf"^{re.escape(iface)}:.*?(?=^[a-zA-Z]|\Z)", re.M | re.S)
@@ -142,6 +155,7 @@ def _pick_macos_iface() -> tuple[str, str]:
                 continue
                 
             # Extract IPv4 address from this interface block
+            # Note: We're specifically looking for inet (IPv4) not inet6
             inet_match = re.search(r"\n\s+inet (\d+\.\d+\.\d+\.\d+)", iface_block.group(0))
             if not inet_match:
                 continue
@@ -158,7 +172,11 @@ def _pick_macos_iface() -> tuple[str, str]:
                 if ip_addr >= ipaddress.ip_address("100.64.0.0") and ip_addr <= ipaddress.ip_address("100.127.255.255"):
                     continue
                 
-                # Test if we can actually bind to this interface
+                # Skip link-local addresses (169.254.x.x) as they're not reliable for cross-device communication
+                if ip_addr.is_link_local:
+                    continue
+                
+                # Test if we can actually bind to this interface with explicit IPv4
                 try:
                     test_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                     test_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -175,6 +193,7 @@ def _pick_macos_iface() -> tuple[str, str]:
                         priority = 25
                     
                     candidates.append((priority, iface, ip))
+                    print(f"Found valid network interface: {iface} with IP: {ip} (priority: {priority})")
                     
                 except OSError:
                     # Can't bind to this interface, skip it
@@ -186,18 +205,35 @@ def _pick_macos_iface() -> tuple[str, str]:
         # Sort by priority (highest first) and return the best interface
         if candidates:
             candidates.sort(reverse=True)
+            print(f"Selected network interface: {candidates[0][1]} with IP: {candidates[0][2]}")
             return candidates[0][1], candidates[0][2]
             
-    except Exception:
+    except Exception as e:
+        print(f"Error detecting network interfaces: {e}")
         pass
     
-    # Fallback: try to get en0 IP
+    # Fallback: try to get en0 IP (common Wi-Fi interface)
     try:
         ip_result = subprocess.run(["ipconfig", "getifaddr", "en0"],
                                    capture_output=True, text=True, check=True)
-        return "en0", ip_result.stdout.strip()
+        ip = ip_result.stdout.strip()
+        print(f"Using fallback en0 with IP: {ip}")
+        return "en0", ip
     except Exception:
-        return "en0", "127.0.0.1"
+        # Last resort - try other common interfaces
+        for iface in ["en1", "en2", "bridge100"]:
+            try:
+                ip_result = subprocess.run(["ipconfig", "getifaddr", iface],
+                                       capture_output=True, text=True, check=True)
+                ip = ip_result.stdout.strip()
+                if ip:
+                    print(f"Using fallback {iface} with IP: {ip}")
+                    return iface, ip
+            except Exception:
+                continue
+        
+        print("WARNING: Could not find a valid network interface, using loopback")
+        return "lo0", "127.0.0.1"
 
 def setup_macos_gloo_env():
     """Configure environment so that torch.distributed Gloo works reliably on macOS.
@@ -209,11 +245,19 @@ def setup_macos_gloo_env():
     2. Resolve an IPv4 address for that interface and pin Gloo to it.
     3. Force IPv4 sockets only & disable IPv6 link-local picks.
     4. Keep a small, single-threaded socket pool for low-latency Wi-Fi links.
+    
+    Returns:
+        str: The IPv4 address being used, or None if not on macOS
     """
     import subprocess, platform, socket
 
+    # Always set these critical IPv4 variables regardless of platform
+    os.environ["GLOO_SOCKET_FAMILY"] = "AF_INET"  # Force IPv4
+    os.environ["GLOO_SOCKET_DISABLE_IPV6"] = "1"  # Explicitly disable IPv6
+
     if platform.system() != "Darwin":
-        # Nothing to do on non-macOS hosts
+        # Just force IPv4 on non-macOS, but otherwise nothing special to do
+        print(f"✓ Non-macOS platform: forcing IPv4 socket family")
         return None
 
     # Step 1 & 2 – pick interface and get its IP
@@ -224,6 +268,12 @@ def setup_macos_gloo_env():
             ip_result = subprocess.run(["ipconfig", "getifaddr", iface],
                                        capture_output=True, text=True, check=True)
             ipaddr = ip_result.stdout.strip()
+            
+            # Validate that this is actually an IPv4 address
+            if not ipaddr or "." not in ipaddr:
+                print(f"⚠️  Warning: Invalid IPv4 address for interface {iface}: {ipaddr}")
+                # Fallback to automatic selection
+                iface, ipaddr = _pick_macos_iface()
         except Exception as e:
             print(f"⚠️  Warning: Could not get IP for user-specified interface {iface}: {e}")
             # Fallback to automatic selection
@@ -233,16 +283,21 @@ def setup_macos_gloo_env():
         iface, ipaddr = _pick_macos_iface()
 
     # Step 3 – set / keep the golden env block
-    os.environ.setdefault("GLOO_SOCKET_IFNAME", iface)
-    os.environ.setdefault("GLOO_SOCKET_IFADDR", ipaddr)
-    os.environ.setdefault("GLOO_SOCKET_FAMILY", "AF_INET")
-    os.environ.setdefault("GLOO_SOCKET_DISABLE_IPV6", "1")
-    os.environ.setdefault("GLOO_ALLOW_UNSECURED", "1")
+    # Instead of setdefault (which won't override existing values), we always set these
+    # to ensure they're correct for cross-Macbook communication
+    os.environ["GLOO_SOCKET_IFNAME"] = iface
+    os.environ["GLOO_SOCKET_IFADDR"] = ipaddr
+    os.environ["GLOO_SOCKET_FAMILY"] = "AF_INET"  # Force IPv4
+    os.environ["GLOO_SOCKET_DISABLE_IPV6"] = "1"  # Explicitly disable IPv6
+    os.environ["GLOO_ALLOW_UNSECURED"] = "1"      # Required for some setups
 
     # Step 4 – small socket pool = lower overhead on Wi-Fi
-    os.environ.setdefault("GLOO_SOCKET_NTHREADS", "1")
-    os.environ.setdefault("GLOO_SOCKET_NSOCKS_PERTHREAD", "8")
+    os.environ["GLOO_SOCKET_NTHREADS"] = "1"
+    os.environ["GLOO_SOCKET_NSOCKS_PERTHREAD"] = "8"
 
+    # These help with networking on macOS
+    os.environ["NCCL_SOCKET_FAMILY"] = "AF_INET"  # In case NCCL is used
+    
     print(f"✓ macOS Gloo pinned to {iface} ({ipaddr})")
     return ipaddr
 
@@ -280,6 +335,11 @@ def init_pytorch_distributed(world, rank):
             return f"{parts[0]}.{parts[1]}.xxx.xxx"
         return "xxx.xxx.xxx.xxx"
     
+    # Always set IPv4 socket family env vars for any platform
+    os.environ["GLOO_SOCKET_FAMILY"] = "AF_INET"
+    os.environ["GLOO_SOCKET_DISABLE_IPV6"] = "1"
+    os.environ["NCCL_SOCKET_FAMILY"] = "AF_INET"  # In case NCCL is used
+    
     # --- Harden Gloo against macOS firewall / IPv6 quirks ----------
     if backend == "gloo":
         import platform
@@ -287,23 +347,25 @@ def init_pytorch_distributed(world, rank):
         # Apply comprehensive macOS fixes
         if platform.system() == "Darwin":
             # Ensure macOS environment is set up
-            setup_macos_gloo_env()
+            ipaddr = setup_macos_gloo_env()
             
             # Environment already configured by setup_macos_gloo_env(); just log.
-            iface  = os.environ.get("GLOO_SOCKET_IFNAME", "en0")
-            ipaddr = os.environ.get("GLOO_SOCKET_IFADDR", world[rank][1][0])
+            iface = os.environ.get("GLOO_SOCKET_IFNAME", "en0")
+            if not ipaddr:
+                ipaddr = os.environ.get("GLOO_SOCKET_IFADDR", world[rank][1][0])
             print(f"using Gloo on {iface} (IPv4), address: {_mask_ip(ipaddr)}, unsecured mode")
         else:
-            # Non-macOS systems - minimal configuration
-            os.environ.setdefault("GLOO_SOCKET_FAMILY", "AF_INET")
+            # Non-macOS systems - ensure IPv4 configuration
+            os.environ["GLOO_SOCKET_FAMILY"] = "AF_INET"
+            os.environ["GLOO_SOCKET_DISABLE_IPV6"] = "1"
             ipaddr = world[rank][1][0]
             print(f"using Gloo (IPv4), address: {_mask_ip(ipaddr)}")
     
     # Additional debugging information
-    if backend == "gloo" and os.getenv("ARCEUS_DEBUG"):
-        print("Gloo environment variables:")
+    if os.getenv("ARCEUS_DEBUG"):
+        print("Network environment variables:")
         for key in sorted(os.environ.keys()):
-            if key.startswith("GLOO_"):
+            if key.startswith("GLOO_") or key.startswith("NCCL_") or key.startswith("MASTER_"):
                 print(f"  {key}: {os.environ[key]}")
     
     print(f"initializing distributed training...")
@@ -316,6 +378,10 @@ def init_pytorch_distributed(world, rank):
         print(f"  → rank 0 will LISTEN on port {master_port}")
     else:
         print(f"  → rank {rank} will CONNECT to {_mask_ip(master_ip)}:{master_port}")
+    
+    # Validate IP address is IPv4 format
+    if "." not in master_ip or len(master_ip.split(".")) != 4:
+        raise RuntimeError(f"Invalid IPv4 address format: {_mask_ip(master_ip)}")
     
     for attempt in range(3):  # Reduced attempts
         try:
@@ -331,6 +397,9 @@ def init_pytorch_distributed(world, rank):
             
             init_method = f"tcp://{master_ip}:{master_port}"
             print(f"  using init method: tcp://{_mask_ip(master_ip)}:{master_port}")
+            
+            # Set socket family environment variable to ensure IPv4
+            os.environ["GLOO_SOCKET_FAMILY"] = "AF_INET"
             
             dist.init_process_group(
                 backend,
@@ -368,9 +437,12 @@ def init_pytorch_distributed(world, rank):
                 print("This indicates the macOS stealth mode is still blocking connections")
                 print("Try: sudo pfctl -d (temporarily disable firewall)")
                 raise
-            elif "fe80::" in error_str:
-                print(f"✗ IPv6 link-local address detected - IPv6 not properly disabled")
-                print("This should not happen with current configuration")
+            elif "fe80::" in error_str or ":" in error_str and "." not in error_str:
+                print(f"✗ IPv6 address detected - IPv6 not properly disabled")
+                print("This indicates the environment variables to force IPv4 are not being applied")
+                print("Try setting these manually:")
+                print("  export GLOO_SOCKET_FAMILY=AF_INET")
+                print("  export GLOO_SOCKET_DISABLE_IPV6=1")
                 raise
             elif "eaddrinuse" in error_str:
                 print(f"  port {master_port} busy, trying another...")

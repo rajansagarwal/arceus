@@ -10,23 +10,50 @@ MAGIC_HEADER = "FFTRAIN_DISC"
 BROADCAST_INTERVAL = 3.0  # seconds between broadcasts
 
 def get_local_ip():
-    # use google DNS to figure out our local IP
+    """Get the local IP address that can be used for network communication.
+    
+    This function explicitly uses IPv4 and tries to find a suitable interface
+    by connecting to an external service.
+    """
+    # Always use IPv4 (AF_INET)
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
+        # Connect to Google DNS to determine which interface to use
         sock.connect(("8.8.8.8", 80))
         return sock.getsockname()[0]
+    except Exception:
+        # Fallback - try to get a non-loopback IPv4 address
+        try:
+            # Get all IPv4 addresses on all interfaces
+            hostname = socket.gethostname()
+            for ip in socket.getaddrinfo(hostname, None, socket.AF_INET):
+                # Skip loopback addresses (127.x.x.x)
+                if not ip[4][0].startswith('127.'):
+                    return ip[4][0]
+        except Exception:
+            pass
+        # Last resort fallback
+        return "127.0.0.1"
     finally:
         sock.close()
 
 def get_broadcast_ip():
-    # just replace last octet with 255
+    """Get the broadcast IP address for the local network.
+    
+    Returns a proper broadcast address by replacing the last octet with 255.
+    """
+    # Get the local IP and replace last octet with 255
     parts = get_local_ip().split(".")
     parts[3] = "255"  
     return ".".join(parts)
 
 def find_free_port():
-    # let OS pick a free port
-    with contextlib.closing(socket.socket()) as s:
+    """Find a free port on the local machine.
+    
+    Explicitly uses IPv4 (AF_INET) for consistency.
+    """
+    # Explicitly use IPv4 (AF_INET)
+    with contextlib.closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as s:
         s.bind(("", 0))
         return s.getsockname()[1]
 
@@ -39,7 +66,7 @@ class UDPBeacon:
         self.running = True
         self.peers = {}  # session_id -> (ip, port, timestamp)
         
-        # set up UDP socket for broadcasting
+        # set up UDP socket for broadcasting - explicitly use IPv4
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         if hasattr(socket, "SO_REUSEPORT"):  # not all systems have this

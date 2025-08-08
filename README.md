@@ -1,98 +1,83 @@
-# arceus v0.5
+# Arceus
 
-distributed training across multiple devices for pytorch ml models
+Distributed training framework for efficient multi-device training.
 
-supports data parallel training with automatic device detection (CUDA GPU > Apple Silicon MPS > CPU). currently fixing model parallelism, not production ready yet. here's how it works:
+## Overview
 
-```python
-import torch
-import torch.nn as nn
-import torch.optim as optim
-import arceus
+Arceus is a lightweight distributed training framework built on top of PyTorch's distributed package. It provides:
 
-# initialize arceus (automatically detects best device)
-rank, world_size, args = arceus.init()
+- Simple API for distributed training
+- Auto-discovery of training sessions on local network
+- Efficient synchronization of model parameters
+- Progress tracking and metrics visualization
+- Cross-platform support (including Apple Silicon)
 
-class NeuralNetwork(nn.Module):
-    # your network architecture
-    pass
+## Installation
 
-model = NeuralNetwork()
-model = arceus.wrap(model)  # automatically moves to best device + distributed training
-
-optimizer = optim.Adam(model.parameters())
-criterion = nn.CrossEntropyLoss()
-
-# Enhanced progress bar with automatic metrics
-for epoch in range(epochs):
-    progress_bar = arceus.progress(dataloader, optimizer)
-    
-    for data, target in progress_bar:
-        data, target = arceus.to_device(data), arceus.to_device(target)
-        
-        # ... training step ...
-        loss = criterion(model(data), target)
-        loss.backward()
-        optimizer.step()
-        
-        # metrics captured automatically! (host sees aggregated, joiners see individual)
-        progress_bar.step(loss=loss)  # pass any metrics: loss=x, accuracy=y, etc.
-            
-...
-arceus.finish()  # clean up distributed training
+```bash
+pip install -e .
 ```
-
-device selection is automatic - arceus chooses the best available device and configures the appropriate distributed backend.
 
 ## Usage
 
-### installation
-
-```bash
-# if using uv 
-uv sync
-# if using pip
-pip install -r requirements.txt
-```
-
-### host
-
-```
-python train.py --host
-```
-
-### join
-
-```
-python train.py --join <session_id>
-```
-
-## macOS distributed training
-
-arceus automatically configures Gloo for macOS to avoid common firewall/IPv6 issues. for manual setup:
+Basic usage example:
 
 ```python
 import arceus
+import torch
 
-# set up macOS-safe environment (optional - done automatically)
-arceus.setup_macos_env()
+# Initialize arceus with CLI arguments
+rank, world_size = arceus.cli()
 
-# validate Gloo setup (optional - for debugging)
-arceus.validate_gloo()
+# Create and distribute your model
+model = YourModel()
+model = arceus.wrap(model)
+
+# Train as usual, arceus handles the distributed part
+for epoch in range(10):
+    for batch in dataloader:
+        # your training code
+        pass
 ```
 
-### troubleshooting
+## Cross-Macbook Communication
 
-if you get `Connection reset by peer` or `state_ != CONNECTING` errors:
+For reliable cross-Macbook communication, Arceus now forces IPv4 usage throughout the codebase. This resolves issues with IPv6 link-local addresses and improves connection reliability.
 
-1. ensure both devices are on the same WiFi network
-2. check router settings - disable "client isolation" or "AP isolation"  
-3. allow Python in macOS Firewall: System Settings → Network → Firewall
-4. try different port: `python train.py --host --port 8080`
+Key features:
+- Explicit IPv4 socket family (AF_INET) for all sockets
+- Improved network interface detection on macOS
+- IPv6 disabled by default for all PyTorch distributed communication
+- Better handling of network interface selection
+- Enhanced error messages for network-related issues
 
-the library automatically sets these environment variables for macOS:
-- `GLOO_SOCKET_FAMILY=AF_INET` (IPv4 only)
-- `GLOO_SOCKET_DISABLE_IPV6=1` (block fe80::* picks)
-- `GLOO_SOCKET_IFNAME=en0` (bind to Wi-Fi)
-- `GLOO_SOCKET_IFADDR=<wifi_ip>` (pin to actual IP)
-- `GLOO_ALLOW_UNSECURED=1` (skip stealth-mode RST)
+### Testing IPv4 Configuration
+
+You can validate your network configuration using the included test script:
+
+```bash
+python test_ipv4.py
+```
+
+This will check:
+- IPv4 address detection
+- Socket binding with IPv4
+- Network interface status
+
+### Troubleshooting
+
+If you encounter connection issues:
+
+1. Ensure both devices are on the same network
+2. Check your firewall settings (allow Python/PyTorch)
+3. Try with explicit interface: `export GLOO_SOCKET_IFNAME=en0`
+4. Set `export ARCEUS_DEBUG=1` for verbose logging
+5. If still having issues, try setting `export ARCEUS_TIMEOUT=60` for longer timeout
+
+## Command Line Options
+
+- `--host`: Start as session host
+- `--join [SESSION_ID]`: Join existing session
+- `--timeout SECONDS`: Discovery timeout (default: 5s)
+- `--epochs N`: Number of training epochs
+- `--port PORT`: Port for PyTorch distributed (host mode)

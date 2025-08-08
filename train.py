@@ -3,10 +3,24 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, Dataset
 import arceus
+import os
 
-# Optional: Set up macOS-safe Gloo environment manually
-# arceus.setup_macos_env()  # Sets GLOO_* environment variables
-# arceus.validate_gloo()    # Test single-rank Gloo setup
+# Force IPv4 for cross-Macbook communication
+print("Setting up environment for cross-Macbook communication...")
+os.environ["GLOO_SOCKET_FAMILY"] = "AF_INET"
+os.environ["GLOO_SOCKET_DISABLE_IPV6"] = "1"
+os.environ["NCCL_SOCKET_FAMILY"] = "AF_INET"
+
+# Set up macOS-safe Gloo environment manually 
+# This is important for cross-Macbook communication
+arceus.setup_macos_env()  # Sets GLOO_* environment variables
+arceus.validate_gloo()    # Test single-rank Gloo setup
+
+# Print network debugging info
+print("Network environment:")
+for key in sorted(os.environ.keys()):
+    if key.startswith("GLOO_") or key.startswith("NCCL_") or key.startswith("MASTER_"):
+        print(f"  {key}: {os.environ[key]}")
 
 # initialize arceus with CLI args
 rank, world_size, args = arceus.cli()

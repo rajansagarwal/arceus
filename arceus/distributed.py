@@ -16,7 +16,7 @@ class TrainingHost:
         self.master_port = master_port  # fixed port for PyTorch distributed
         self.host_uuid = str(uuid.uuid4())
         
-        # TCP server to accept joiner connections
+        # TCP server to accept joiner connections - explicitly use IPv4
         self.server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.server_sock.bind(("", self.tcp_port))
@@ -43,6 +43,16 @@ class TrainingHost:
                 client_id = parts[0]
                 client_ip = parts[1] if len(parts) > 1 else addr[0]
                 
+                # Validate IPv4 format
+                try:
+                    # Simple validation: check if it has 4 parts separated by dots
+                    if len(client_ip.split('.')) != 4:
+                        # Use the address from the socket connection
+                        client_ip = addr[0]
+                except Exception:
+                    # Fallback to the address from the socket connection
+                    client_ip = addr[0]
+                
                 self.clients[client_id] = (client_sock, client_ip)
                 print(f"✅ Peer joined: {client_id[:8]}...")
                 
@@ -54,7 +64,9 @@ class TrainingHost:
         self.accepting = False
         
         # build world list - host is always rank 0
-        world = [(self.host_uuid, (get_local_ip(), self.master_port))]
+        # Ensure we're using the IPv4 address
+        local_ip = get_local_ip()
+        world = [(self.host_uuid, (local_ip, self.master_port))]
         
         # add all the joiners with their actual IP addresses
         for client_id in sorted(self.clients.keys()):
@@ -87,7 +99,7 @@ class TrainingJoiner:
         self.sock = None
     
     def connect_to_host(self):
-        # connect to host and register ourselves
+        # connect to host and register ourselves - explicitly use IPv4
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.sock.connect((self.host_ip, self.host_port))
         
@@ -108,6 +120,7 @@ class TrainingJoiner:
         
         # make sure we're in the world list somehow
         if all(peer_id != self.my_id for peer_id, _ in world):
+            # Ensure we're using the IPv4 address
             world.append((self.my_id, (self.host_ip, world[0][1][1])))
         
         return world  # don't sort! host already sent it in the right order 
