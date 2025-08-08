@@ -2,6 +2,8 @@
 
 distributed training across multiple devices for pytorch ml models
 
+hi
+
 supports data parallel training with automatic device detection (CUDA GPU > Apple Silicon MPS > CPU). currently fixing model parallelism, not production ready yet. here's how it works:
 
 ```python
