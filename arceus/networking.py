@@ -10,11 +10,22 @@ MAGIC_HEADER = "FFTRAIN_DISC"
 BROADCAST_INTERVAL = 3.0  # seconds between broadcasts
 
 def get_local_ip():
-    # use google DNS to figure out our local IP
+    # use google DNS to figure out our local IP, explicitly using IPV4
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         sock.connect(("8.8.8.8", 80))
-        return sock.getsockname()[0]
+        ip = sock.getsockname()[0]
+        # Verify this is a valid IPV4 address
+        socket.inet_pton(socket.AF_INET, ip)  # Will raise an error if not valid IPV4
+        return ip
+    except (socket.error, OSError):
+        # Fallback to using the hostname resolution (should be IPV4)
+        try:
+            hostname = socket.gethostname()
+            return socket.gethostbyname(hostname)  # Returns first (and usually only) IPV4 address
+        except socket.error:
+            # Last resort fallback
+            return "127.0.0.1"
     finally:
         sock.close()
 
@@ -25,9 +36,9 @@ def get_broadcast_ip():
     return ".".join(parts)
 
 def find_free_port():
-    # let OS pick a free port
-    with contextlib.closing(socket.socket()) as s:
-        s.bind(("", 0))
+    # let OS pick a free port, explicitly using IPV4
+    with contextlib.closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as s:
+        s.bind(("0.0.0.0", 0))  # Explicitly bind to all available IPV4 interfaces
         return s.getsockname()[1]
 
 class UDPBeacon:
@@ -39,13 +50,14 @@ class UDPBeacon:
         self.running = True
         self.peers = {}  # session_id -> (ip, port, timestamp)
         
-        # set up UDP socket for broadcasting
+        # set up UDP socket for broadcasting, explicitly using IPV4
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         if hasattr(socket, "SO_REUSEPORT"):  # not all systems have this
             self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-        self.sock.bind(("", DISCOVERY_PORT))
+        # Explicitly bind to all IPV4 interfaces (0.0.0.0) instead of empty string
+        self.sock.bind(("0.0.0.0", DISCOVERY_PORT))
         
         # start threads for tx/rx
         Thread(target=self._broadcast_loop, daemon=True).start()

@@ -16,10 +16,11 @@ class TrainingHost:
         self.master_port = master_port  # fixed port for PyTorch distributed
         self.host_uuid = str(uuid.uuid4())
         
-        # TCP server to accept joiner connections
+        # TCP server to accept joiner connections, explicitly using IPV4
         self.server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.server_sock.bind(("", self.tcp_port))
+        # Explicitly bind to all IPV4 interfaces (0.0.0.0) instead of empty string
+        self.server_sock.bind(("0.0.0.0", self.tcp_port))
         self.server_sock.listen(8)  # max 8 pending connections
         
         self.clients = {}  # uuid -> socket
@@ -87,12 +88,29 @@ class TrainingJoiner:
         self.sock = None
     
     def connect_to_host(self):
-        # connect to host and register ourselves
+        # connect to host and register ourselves, explicitly using IPV4
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        
+        # Validate host_ip is a valid IPV4 address
+        try:
+            socket.inet_pton(socket.AF_INET, self.host_ip)
+        except (socket.error, OSError):
+            # Try to resolve to an IPV4 address
+            try:
+                addr_info = socket.getaddrinfo(self.host_ip, self.host_port, socket.AF_INET, socket.SOCK_STREAM)
+                for family, socktype, proto, canonname, sockaddr in addr_info:
+                    if family == socket.AF_INET:
+                        self.host_ip = sockaddr[0]
+                        break
+            except (socket.error, OSError) as e:
+                print(f"Warning: Failed to resolve host to IPv4: {e}")
+                # Continue with original IP and hope for the best
+        
         self.sock.connect((self.host_ip, self.host_port))
         
         # send our ID and IP address
         from .networking import get_local_ip
+        # Get our IPV4 address
         my_ip = get_local_ip()
         data = f"{self.my_id}:{my_ip}"
         self.sock.send(data.encode())

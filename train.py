@@ -3,10 +3,13 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, Dataset
 import arceus
+import platform
 
-# Optional: Set up macOS-safe Gloo environment manually
-# arceus.setup_macos_env()  # Sets GLOO_* environment variables
-# arceus.validate_gloo()    # Test single-rank Gloo setup
+# Set up macOS-safe Gloo environment manually with IPv4 enforcement
+if platform.system() == "Darwin":  # Only on macOS
+    print("Setting up macOS IPv4 environment...")
+    arceus.setup_macos_env()  # Sets GLOO_* environment variables
+    arceus.validate_gloo()    # Test single-rank Gloo setup
 
 # initialize arceus with CLI args
 rank, world_size, args = arceus.cli()
