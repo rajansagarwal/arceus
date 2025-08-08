@@ -1,20 +1,36 @@
 import json
 import select
 import socket
+import ssl
 import uuid
 from threading import Thread
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 
 from .networking import get_local_ip, find_free_port
+from .ssl_utils import TLSContext, create_tls_context
+from .utils import USE_TLS, TLS_VERIFY
 
 class TrainingHost:
     """Host side of distributed training setup"""
     
-    def __init__(self, session_id, master_port):
+    def __init__(self, session_id, master_port, use_tls=USE_TLS, 
+                 cert_path=None, key_path=None, verify_mode=ssl.CERT_NONE):
         self.session_id = session_id
         self.tcp_port = find_free_port()
         self.master_port = master_port  # fixed port for PyTorch distributed
         self.host_uuid = str(uuid.uuid4())
+        self.use_tls = use_tls
+        self.tls_context = None
+        
+        # Set up TLS context if enabled
+        if self.use_tls:
+            verify_mode = ssl.CERT_REQUIRED if TLS_VERIFY else ssl.CERT_NONE
+            self.tls_context = TLSContext(
+                cert_path=cert_path,
+                key_path=key_path,
+                verify_mode=verify_mode,
+                server_side=True
+            )
         
         # TCP server to accept joiner connections
         self.server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -22,7 +38,7 @@ class TrainingHost:
         self.server_sock.bind(("", self.tcp_port))
         self.server_sock.listen(8)  # max 8 pending connections
         
-        self.clients = {}  # uuid -> socket
+        self.clients = {}  # uuid -> (socket, client_ip)
         self.accepting = True
         
         # start accepting in background thread
@@ -37,7 +53,18 @@ class TrainingHost:
                     continue
                 
                 client_sock, addr = self.server_sock.accept()
-                # receive client_id and their IP address
+                
+                # Wrap socket with TLS if enabled
+                if self.use_tls and self.tls_context:
+                    try:
+                        client_sock = self.tls_context.wrap_socket(client_sock, server_side=True)
+                        print(f"🔒 TLS connection established with {addr[0]}")
+                    except ssl.SSLError as e:
+                        print(f"⚠️ TLS handshake failed with {addr[0]}: {e}")
+                        client_sock.close()
+                        continue
+                
+                # Receive client_id and their IP address
                 data = client_sock.recv(256).decode()
                 parts = data.split(':')
                 client_id = parts[0]
@@ -46,8 +73,11 @@ class TrainingHost:
                 self.clients[client_id] = (client_sock, client_ip)
                 print(f"✅ Peer joined: {client_id[:8]}...")
                 
-            except OSError:
-                break  # probably shutting down
+            except (OSError, ssl.SSLError) as e:
+                print(f"⚠️ Connection error: {e}")
+                if not self.accepting:
+                    break  # probably shutting down
+                continue
     
     def start_training(self):
         # send start signal to everyone
@@ -71,38 +101,87 @@ class TrainingHost:
             try:
                 sock.sendall(msg)
                 sock.close()
-            except:
-                pass  # client might have disconnected already
+            except Exception as e:
+                print(f"⚠️ Failed to send start signal to {client_id[:8]}: {e}")
+                # client might have disconnected already
         
         self.server_sock.close()
+        
+        # Clean up TLS context if it exists
+        if self.tls_context:
+            self.tls_context.cleanup()
+        
         return world
 
 class TrainingJoiner:
     """Client side for joining a training session"""
     
-    def __init__(self, host_ip, host_port):
+    def __init__(self, host_ip, host_port, use_tls=False, cert_path=None, key_path=None):
         self.host_ip = host_ip
         self.host_port = host_port
         self.my_id = str(uuid.uuid4())
+        self.use_tls = use_tls
+        self.tls_context = None
         self.sock = None
+        
+        # Set up TLS context if enabled
+        if self.use_tls:
+            self.tls_context = TLSContext(
+                cert_path=cert_path,
+                key_path=key_path,
+                verify_mode=ssl.CERT_NONE,  # Accept self-signed certificates
+                server_side=False
+            )
     
     def connect_to_host(self):
         # connect to host and register ourselves
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.sock.connect((self.host_ip, self.host_port))
         
-        # send our ID and IP address
-        from .networking import get_local_ip
-        my_ip = get_local_ip()
-        data = f"{self.my_id}:{my_ip}"
-        self.sock.send(data.encode())
-        # connected but don't wait for start yet
+        try:
+            self.sock.connect((self.host_ip, self.host_port))
+            
+            # Wrap socket with TLS if enabled
+            if self.use_tls and self.tls_context:
+                try:
+                    self.sock = self.tls_context.wrap_socket(
+                        self.sock,
+                        server_hostname=self.host_ip  # For SNI
+                    )
+                    print(f"🔒 TLS connection established with host")
+                except ssl.SSLError as e:
+                    print(f"⚠️ TLS handshake failed: {e}")
+                    raise ConnectionError(f"TLS handshake failed: {e}")
+            
+            # send our ID and IP address
+            from .networking import get_local_ip
+            my_ip = get_local_ip()
+            data = f"{self.my_id}:{my_ip}"
+            self.sock.send(data.encode())
+            # connected but don't wait for start yet
+            
+        except Exception as e:
+            if self.sock:
+                self.sock.close()
+                self.sock = None
+            raise ConnectionError(f"Failed to connect to host: {e}")
     
     def wait_for_start(self):
         # wait for host to tell us to start training
-        data = self.sock.recv(4096)
-        msg = json.loads(data.decode())
-        self.sock.close()
+        try:
+            data = self.sock.recv(4096)
+            msg = json.loads(data.decode())
+        except Exception as e:
+            print(f"⚠️ Failed to receive start signal: {e}")
+            raise
+        finally:
+            # Clean up
+            if self.sock:
+                self.sock.close()
+                self.sock = None
+            
+            # Clean up TLS context if it exists
+            if self.tls_context:
+                self.tls_context.cleanup()
         
         world = msg["world"]
         

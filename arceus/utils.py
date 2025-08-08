@@ -5,6 +5,8 @@ import time
 # Environment variables
 USE_AMP = os.getenv("ARCEUS_FP16", "0") == "1"
 BUCKET_SIZE_KB = int(os.getenv("ARCEUS_BUCKET_KB", "0"))
+USE_TLS = os.getenv("ARCEUS_TLS", "1") == "1"  # Default to enabled
+TLS_VERIFY = os.getenv("ARCEUS_TLS_VERIFY", "0") == "1"  # Default to no verification
 
 # ANSI colors for pretty output
 BOLD = "\033[1m"
@@ -90,6 +92,13 @@ def parse_cli_args():
     parser.add_argument("--timeout", type=int, default=5, help="Discovery timeout")
     parser.add_argument("--epochs", type=int, default=2, help="Number of epochs")
     parser.add_argument("--port", type=int, default=int(os.getenv("ARCEUS_MASTER_PORT", "29500")), help="Master port for PyTorch distributed (host)")
+    
+    # TLS options
+    parser.add_argument("--tls", action="store_true", default=USE_TLS, help="Enable TLS encryption (default: %(default)s)")
+    parser.add_argument("--no-tls", action="store_false", dest="tls", help="Disable TLS encryption")
+    parser.add_argument("--tls-verify", action="store_true", default=TLS_VERIFY, help="Verify TLS certificates (default: %(default)s)")
+    parser.add_argument("--tls-cert", type=str, help="Path to TLS certificate file")
+    parser.add_argument("--tls-key", type=str, help="Path to TLS private key file")
     
     args = parser.parse_args()
     

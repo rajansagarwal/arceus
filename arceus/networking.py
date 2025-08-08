@@ -9,6 +9,9 @@ DISCOVERY_PORT = 12346
 MAGIC_HEADER = "FFTRAIN_DISC" 
 BROADCAST_INTERVAL = 3.0  # seconds between broadcasts
 
+# TLS support indicator
+DEFAULT_TLS_ENABLED = True  # default to secure connections
+
 def get_local_ip():
     # use google DNS to figure out our local IP
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -33,11 +36,12 @@ def find_free_port():
 class UDPBeacon:
     """UDP beacon for finding other training sessions on the network"""
     
-    def __init__(self, session_id, tcp_port):
+    def __init__(self, session_id, tcp_port, tls_enabled=DEFAULT_TLS_ENABLED):
         self.session_id = session_id
         self.tcp_port = tcp_port
+        self.tls_enabled = tls_enabled
         self.running = True
-        self.peers = {}  # session_id -> (ip, port, timestamp)
+        self.peers = {}  # session_id -> (ip, port, timestamp, tls_enabled)
         
         # set up UDP socket for broadcasting
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -57,7 +61,8 @@ class UDPBeacon:
             "magic": MAGIC_HEADER,
             "session_id": self.session_id,
             "ip": get_local_ip(),
-            "port": self.tcp_port
+            "port": self.tcp_port,
+            "tls": self.tls_enabled
         }
         packet = json.dumps(msg).encode()
         dest = (get_broadcast_ip(), DISCOVERY_PORT)
@@ -82,7 +87,8 @@ class UDPBeacon:
                 self.peers[info["session_id"]] = (
                     info["ip"], 
                     info["port"], 
-                    time.time()
+                    time.time(),
+                    info.get("tls", False)  # Default to non-TLS for backward compatibility
                 )
             except OSError:
                 break
@@ -92,10 +98,10 @@ class UDPBeacon:
         now = time.time()
         active = {}
         
-        for session_id, (ip, port, ts) in self.peers.items():
+        for session_id, (ip, port, ts, tls_enabled) in self.peers.items():
             # skip our own discovery beacon and expired ones
             if session_id != "DISC" and port > 0 and (now - ts) < 10:
-                active[session_id] = (ip, port)
+                active[session_id] = (ip, port, tls_enabled)
         
         return active
     

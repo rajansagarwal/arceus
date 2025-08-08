@@ -6,7 +6,7 @@ from .distributed import TrainingHost, TrainingJoiner
 from .progress import MetricProgressBar
 from .utils import (banner, wait_for_sessions, pick_session, init_pytorch_distributed, 
                    detect_device, print_device_info, move_to_device, setup_macos_gloo_env, 
-                   validate_gloo_setup, BOLD, END)
+                   validate_gloo_setup, BOLD, END, USE_TLS, TLS_VERIFY)
 
 # Global state
 _beacon = None
@@ -15,10 +15,11 @@ _world = None
 _device = None
 _device_info = None
 
-def init(mode="auto", session=None, timeout=5, port=None):
+def init(mode="auto", session=None, timeout=5, port=None, use_tls=USE_TLS, 
+         tls_verify=TLS_VERIFY, tls_cert=None, tls_key=None):
     global _beacon, _rank, _world, _device, _device_info
     
-    _beacon = UDPBeacon("DISC", 0)
+    _beacon = UDPBeacon("DISC", 0, tls_enabled=use_tls)
     time.sleep(0.3)
     
     # decide whether to host or join
@@ -49,10 +50,11 @@ def init(mode="auto", session=None, timeout=5, port=None):
             port = int(os.getenv("ARCEUS_MASTER_PORT", "29500"))
 
         session_id = uuid.uuid4().hex[:4].upper()
-        host = TrainingHost(session_id, port)
+        host = TrainingHost(session_id, port, use_tls=use_tls, 
+                          cert_path=tls_cert, key_path=tls_key)
         
         _beacon.stop()
-        _beacon = UDPBeacon(session_id, host.tcp_port)
+        _beacon = UDPBeacon(session_id, host.tcp_port, tls_enabled=use_tls)
         
         banner(f"\nSession ID: {BOLD}{session_id}{END} (share with peers)")
         print("Press Enter when everyone has joined with '--join " + session_id + "'")
@@ -73,17 +75,21 @@ def init(mode="auto", session=None, timeout=5, port=None):
             while time.time() < deadline:
                 sessions = _beacon.get_active_sessions()
                 if session in sessions:
-                    host_ip, host_port = sessions[session]
-                    print(f"✓ Found session '{session}' at {host_ip}:{host_port}")
+                    host_ip, host_port, tls_enabled = sessions[session]
+                    print(f"✓ Found session '{session}' at {host_ip}:{host_port} {'(TLS enabled)' if tls_enabled else ''}")
+                    # Override use_tls based on what the host is using
+                    use_tls = tls_enabled
                     break
                 time.sleep(0.3)
             else:
                 raise RuntimeError(f"Session '{session}' not found after {timeout}s")
         else:
-            host_ip, host_port = _beacon.get_active_sessions()[session]
+            host_ip, host_port, tls_enabled = _beacon.get_active_sessions()[session]
+            use_tls = tls_enabled
         
         print(f"Connecting to session '{session}'...")
-        joiner = TrainingJoiner(host_ip, host_port)
+        joiner = TrainingJoiner(host_ip, host_port, use_tls=use_tls,
+                             cert_path=tls_cert, key_path=tls_key)
         joiner.connect_to_host()
         
         banner(f"Successfully joined session '{session}' - waiting for host to start training...")
@@ -211,7 +217,16 @@ def cli():
     from .utils import parse_cli_args
     
     mode, session, args = parse_cli_args()
-    rank, world_size = init(mode, session, args.timeout, args.port)
+    rank, world_size = init(
+        mode, 
+        session, 
+        args.timeout, 
+        args.port,
+        use_tls=args.tls,
+        tls_verify=args.tls_verify,
+        tls_cert=args.tls_cert,
+        tls_key=args.tls_key
+    )
     return rank, world_size, args 
 
 def get_learning_rate(optimizer):
