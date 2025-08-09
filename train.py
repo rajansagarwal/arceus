@@ -48,16 +48,17 @@ for epoch in range(args.epochs):
         data, target = arceus.to_device(data), arceus.to_device(target)
         
         optimizer.zero_grad()
-        output = model(data)
         
         # amp if enabled
         if arceus._USE_AMP:
             device = arceus.get_device()
             with torch.autocast(device_type=device.type, dtype=torch.float16):
+                output = model(data)
                 loss = criterion(output, target)
         else:
+            output = model(data)
             loss = criterion(output, target)
-        
+
         loss.backward()
         optimizer.step()
         
